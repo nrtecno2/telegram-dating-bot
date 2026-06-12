@@ -21,11 +21,11 @@ from handlers.start import handle_start, handle_verify_callback, handle_continue
 from handlers.profile import (
     handle_name, handle_gender_callback, handle_age, handle_location,
     handle_location_text, handle_about, handle_media, handle_confirm_callback,
-    handle_preference_callback, show_main_menu, handle_my_profile, handle_edit_profile
+    handle_preference_callback, show_main_menu, handle_edit_profile
 )
 from handlers.view_profiles import (
     handle_view_profiles, handle_like_callback, handle_skip_callback,
-    handle_stop_callback
+    handle_stop_callback, handle_my_profile
 )
 from handlers.notifications import handle_notifications
 from handlers.chat import handle_chat_callback, handle_chat_message, handle_cancel_chat
