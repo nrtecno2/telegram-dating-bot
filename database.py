@@ -1,212 +1,264 @@
-import sqlite3
-from typing import Optional, List, Dict, Any
+import os
+import logging
+from datetime import datetime
+from typing import Optional, Dict, List, Any
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, OperationFailure
+from pymongo.database import Database as MongoDatabase
+from pymongo.collection import Collection
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Database:
-    def __init__(self, db_name: str = "bot.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.init_tables()
-
-    # =========================
-    # TABLES
-    # =========================
-    def init_tables(self):
-        # USERS TABLE
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            name TEXT,
-            age INTEGER,
-            gender TEXT,
-            bio TEXT,
-            location TEXT,
-            photos TEXT,
-            state TEXT DEFAULT 'IDLE',
-            is_blocked INTEGER DEFAULT 0
-        )
-        """)
-
-        # LIKES TABLE
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS likes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_user INTEGER,
-            to_user INTEGER
-        )
-        """)
-
-        # MATCHES TABLE
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user1 INTEGER,
-            user2 INTEGER
-        )
-        """)
-
-        # MESSAGES TABLE
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER,
-            receiver_id INTEGER,
-            message TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-
-        # NOTIFICATIONS TABLE
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            text TEXT,
-            is_read INTEGER DEFAULT 0
-        )
-        """)
-
-        self.conn.commit()
-
-    # =========================
-    # USER FUNCTIONS
-    # =========================
-    def add_user(self, user_id: int, username: str):
-        self.cursor.execute("""
-        INSERT OR IGNORE INTO users (user_id, username)
-        VALUES (?, ?)
-        """, (user_id, username))
-        self.conn.commit()
-
-    def update_user_field(self, user_id: int, field: str, value: Any):
-        query = f"UPDATE users SET {field} = ? WHERE user_id = ?"
-        self.cursor.execute(query, (value, user_id))
-        self.conn.commit()
-
-    def get_user(self, user_id: int) -> Optional[Dict]:
-        self.cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = self.cursor.fetchone()
-        if row:
-            return self._user_row_to_dict(row)
-        return None
-
-    def get_all_users(self) -> List[Dict]:
-        self.cursor.execute("SELECT * FROM users")
-        rows = self.cursor.fetchall()
-        return [self._user_row_to_dict(r) for r in rows]
-
-    def _user_row_to_dict(self, row):
-        return {
-            "user_id": row[0],
-            "username": row[1],
-            "name": row[2],
-            "age": row[3],
-            "gender": row[4],
-            "bio": row[5],
-            "location": row[6],
-            "photos": row[7],
-            "state": row[8],
-            "is_blocked": row[9],
-        }
-
-    # =========================
-    # LIKES SYSTEM
-    # =========================
-    def add_like(self, from_user: int, to_user: int):
-        self.cursor.execute("""
-        INSERT INTO likes (from_user, to_user)
-        VALUES (?, ?)
-        """, (from_user, to_user))
-        self.conn.commit()
-
-    def check_like(self, from_user: int, to_user: int) -> bool:
-        self.cursor.execute("""
-        SELECT 1 FROM likes
-        WHERE from_user = ? AND to_user = ?
-        """, (from_user, to_user))
-        return self.cursor.fetchone() is not None
-
-    # =========================
-    # MATCH SYSTEM
-    # =========================
-    def create_match(self, user1: int, user2: int):
-        self.cursor.execute("""
-        INSERT INTO matches (user1, user2)
-        VALUES (?, ?)
-        """, (user1, user2))
-        self.conn.commit()
-
-    def get_matches(self, user_id: int) -> List[int]:
-        self.cursor.execute("""
-        SELECT user1, user2 FROM matches
-        WHERE user1 = ? OR user2 = ?
-        """, (user_id, user_id))
-
-        rows = self.cursor.fetchall()
-        matches = []
-
-        for u1, u2 in rows:
-            matches.append(u2 if u1 == user_id else u1)
-
-        return matches
-
-    # =========================
-    # MESSAGES
-    # =========================
-    def save_message(self, sender_id: int, receiver_id: int, message: str):
-        self.cursor.execute("""
-        INSERT INTO messages (sender_id, receiver_id, message)
-        VALUES (?, ?, ?)
-        """, (sender_id, receiver_id, message))
-        self.conn.commit()
-
-    def get_chat(self, user1: int, user2: int) -> List[Dict]:
-        self.cursor.execute("""
-        SELECT sender_id, receiver_id, message, timestamp
-        FROM messages
-        WHERE (sender_id = ? AND receiver_id = ?)
-        OR (sender_id = ? AND receiver_id = ?)
-        ORDER BY timestamp ASC
-        """, (user1, user2, user2, user1))
-
-        rows = self.cursor.fetchall()
-
-        return [
-            {
-                "sender_id": r[0],
-                "receiver_id": r[1],
-                "message": r[2],
-                "timestamp": r[3],
+    """MongoDB Database Manager for DEMON Dating Bot"""
+    
+    def __init__(self):
+        """Initialize database connection"""
+        self.mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+        self.db_name = os.getenv("DB_NAME", "dating_bot")
+        self.client: Optional[MongoClient] = None
+        self.db: Optional[MongoDatabase] = None
+        self._connect()
+    
+    def _connect(self) -> None:
+        """Establish connection to MongoDB"""
+        try:
+            self.client = MongoClient(
+                self.mongo_uri,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=30000,
+                retryWrites=True,
+                w='majority'
+            )
+            
+            # Test connection
+            self.client.admin.command('ping')
+            self.db = self.client[self.db_name]
+            
+            logger.info(f"✅ MongoDB connected successfully to: {self.db_name}")
+            
+            # Create indexes
+            self._create_indexes()
+            
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+            logger.error(f"❌ MongoDB connection failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Unexpected database error: {e}")
+            raise
+    
+    def _create_indexes(self) -> None:
+        """Create all necessary database indexes for performance"""
+        
+        # ========== USERS COLLECTION ==========
+        users_col = self.db["users"]
+        users_col.create_index("user_id", unique=True)
+        users_col.create_index("username")
+        users_col.create_index("preference")
+        users_col.create_index("is_active")
+        users_col.create_index("created_at")
+        users_col.create_index([("latitude", 1), ("longitude", 1)])
+        logger.info("✅ Users collection indexes created")
+        
+        # ========== PROFILES COLLECTION ==========
+        profiles_col = self.db["profiles"]
+        profiles_col.create_index("user_id", unique=True)
+        profiles_col.create_index("gender")
+        profiles_col.create_index("age")
+        profiles_col.create_index("location_text")
+        profiles_col.create_index([("latitude", 1), ("longitude", 1)])
+        profiles_col.create_index("is_active")
+        profiles_col.create_index("created_at")
+        
+        # 2dsphere index for geospatial queries
+        try:
+            profiles_col.create_index([("location", "2dsphere")])
+        except Exception as e:
+            logger.warning(f"2dsphere index creation skipped: {e}")
+        logger.info("✅ Profiles collection indexes created")
+        
+        # ========== LIKES COLLECTION ==========
+        likes_col = self.db["likes"]
+        likes_col.create_index([("from_user", 1), ("to_user", 1)], unique=True)
+        likes_col.create_index("to_user")
+        likes_col.create_index("from_user")
+        likes_col.create_index("is_mutual")
+        likes_col.create_index("is_read")
+        likes_col.create_index("created_at")
+        logger.info("✅ Likes collection indexes created")
+        
+        # ========== NOTIFICATIONS COLLECTION ==========
+        notif_col = self.db["notifications"]
+        notif_col.create_index("user_id")
+        notif_col.create_index("type")
+        notif_col.create_index("is_read")
+        notif_col.create_index("created_at")
+        notif_col.create_index([("user_id", 1), ("is_read", 1)])
+        logger.info("✅ Notifications collection indexes created")
+        
+        # ========== MESSAGES COLLECTION ==========
+        msg_col = self.db["messages"]
+        msg_col.create_index([("from_user", 1), ("to_user", 1)])
+        msg_col.create_index("to_user")
+        msg_col.create_index("is_read")
+        msg_col.create_index("created_at")
+        msg_col.create_index([("conversation_id", 1)])
+        logger.info("✅ Messages collection indexes created")
+        
+        # ========== MEDIA COLLECTION ==========
+        media_col = self.db["media"]
+        media_col.create_index("user_id")
+        media_col.create_index("file_id")
+        media_col.create_index("media_type")
+        media_col.create_index("created_at")
+        logger.info("✅ Media collection indexes created")
+        
+        # ========== SESSIONS COLLECTION ==========
+        sessions_col = self.db["sessions"]
+        sessions_col.create_index("token", unique=True)
+        sessions_col.create_index("user_id")
+        sessions_col.create_index("expires_at")
+        sessions_col.create_index([("user_id", 1), ("is_active", 1)])
+        logger.info("✅ Sessions collection indexes created")
+        
+        # ========== REPORTS COLLECTION ==========
+        reports_col = self.db["reports"]
+        reports_col.create_index("reported_user")
+        reports_col.create_index("reporter_user")
+        reports_col.create_index("status")
+        reports_col.create_index("created_at")
+        logger.info("✅ Reports collection indexes created")
+        
+        # ========== FEEDBACK COLLECTION ==========
+        feedback_col = self.db["feedback"]
+        feedback_col.create_index("user_id")
+        feedback_col.create_index("created_at")
+        logger.info("✅ Feedback collection indexes created")
+        
+        logger.info("✅ All database indexes created successfully")
+    
+    def get_collection(self, name: str) -> Collection:
+        """Get a collection by name"""
+        if not self.db:
+            self._connect()
+        return self.db[name]
+    
+    def get_db(self) -> MongoDatabase:
+        """Get database instance"""
+        if not self.db:
+            self._connect()
+        return self.db
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Check database health status"""
+        try:
+            self.client.admin.command('ping')
+            stats = {
+                "status": "healthy",
+                "connected": True,
+                "database": self.db_name,
+                "collections": self.db.list_collection_names(),
+                "timestamp": datetime.utcnow()
             }
-            for r in rows
-        ]
+            return stats
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "connected": False,
+                "error": str(e),
+                "timestamp": datetime.utcnow()
+            }
+    
+    def close(self) -> None:
+        """Close database connection"""
+        if self.client:
+            self.client.close()
+            logger.info("🔌 MongoDB connection closed")
+    
+    def drop_collection(self, collection_name: str) -> bool:
+        """Drop a collection (use with caution)"""
+        try:
+            self.db[collection_name].drop()
+            logger.warning(f"Collection dropped: {collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to drop collection {collection_name}: {e}")
+            return False
+    
+    def get_stats(self) -> Dict[str, int]:
+        """Get database statistics"""
+        stats = {}
+        try:
+            for collection_name in self.db.list_collection_names():
+                stats[collection_name] = self.db[collection_name].count_documents({})
+        except Exception as e:
+            logger.error(f"Failed to get stats: {e}")
+        return stats
+    
+    def backup(self, backup_name: str = None) -> str:
+        """Create a backup reference (actual backup needs external tool)"""
+        if not backup_name:
+            backup_name = f"backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        
+        # This is a metadata backup reference
+        backup_info = {
+            "name": backup_name,
+            "timestamp": datetime.utcnow(),
+            "collections": self.db.list_collection_names(),
+            "stats": self.get_stats()
+        }
+        
+        backup_col = self.db["backups"]
+        backup_col.insert_one(backup_info)
+        
+        logger.info(f"📦 Backup metadata created: {backup_name}")
+        return backup_name
 
-    # =========================
-    # NOTIFICATIONS
-    # =========================
-    def add_notification(self, user_id: int, text: str):
-        self.cursor.execute("""
-        INSERT INTO notifications (user_id, text)
-        VALUES (?, ?)
-        """, (user_id, text))
-        self.conn.commit()
 
-    def get_notifications(self, user_id: int):
-        self.cursor.execute("""
-        SELECT id, text, is_read FROM notifications
-        WHERE user_id = ?
-        """, (user_id,))
-        return self.cursor.fetchall()
+# ========== SINGLETON INSTANCE ==========
+_db_instance: Optional[Database] = None
 
-    def mark_notification_read(self, notif_id: int):
-        self.cursor.execute("""
-        UPDATE notifications SET is_read = 1 WHERE id = ?
-        """, (notif_id,))
-        self.conn.commit()
+def get_db() -> Database:
+    """Get singleton database instance"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+    return _db_instance
 
-    # =========================
-    # CLOSE
-    # =========================
-    def close(self):
-        self.conn.close()
+def get_collection(name: str) -> Collection:
+    """Get collection from database"""
+    return get_db().get_collection(name)
+
+def close_db() -> None:
+    """Close database connection"""
+    global _db_instance
+    if _db_instance:
+        _db_instance.close()
+        _db_instance = None
+
+
+# ========== DECORATORS ==========
+def db_operation(retry_count: int = 3):
+    """Decorator for database operations with retry logic"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(retry_count):
+                try:
+                    return await func(*args, **kwargs)
+                except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+                    last_error = e
+                    logger.warning(f"DB operation failed (attempt {attempt + 1}/{retry_count}): {e}")
+                    if attempt < retry_count - 1:
+                        import asyncio
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        raise
+                except Exception as e:
+                    raise
+            raise last_error
+        return wrapper
+    return decorator
