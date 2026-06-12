@@ -1,45 +1,46 @@
 import logging
+import random
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
-from telegram.ext import ContextTypes
+from telebot import types
 from database import get_db
-from utils.location import get_nearby_profiles, calculate_distance
+from utils.location import get_nearby_profiles
 
 logger = logging.getLogger(__name__)
-
 db = get_db()
 
-# Store active profile viewing sessions
+# Store active viewing sessions
 active_sessions = {}
 
-async def view_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def handle_view_profiles(bot, call, user_states, user_temp_data):
     """Start viewing profiles based on user preference"""
-    query = update.callback_query if update.callback_query else None
-    user_id = update.effective_user.id if update.effective_user else update.message.from_user.id
+    user_id = call.from_user.id
     
-    if query:
-        await query.answer()
+    bot.answer_callback_query(call.id)
     
     # Check if user has profile
     my_profile = db.get_collection("profiles").find_one({"user_id": user_id})
     if not my_profile:
-        msg = "❌ You need to create a profile first!\nUse /start to begin."
-        if query:
-            await query.edit_message_text(msg)
-        else:
-            await update.message.reply_text(msg)
+        bot.edit_message_text(
+            "❌ You need to create a profile first!\nUse /start to begin.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
         return
     
     # Get user preference
     user = db.get_collection("users").find_one({"user_id": user_id})
-    if not user or 'preference' not in user:
-        keyboard = [[InlineKeyboardButton("⚙️ Set Preference", callback_data="set_preference")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = "⚠️ Please set your preference first!\n\nChoose who you want to see:"
-        if query:
-            await query.edit_message_text(msg, reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(msg, reply_markup=reply_markup)
+    if not user or not user.get('preference'):
+        markup = types.InlineKeyboardMarkup()
+        btn_pref = types.InlineKeyboardButton("⚙️ Set Preference", callback_data="set_preference")
+        markup.add(btn_pref)
+        
+        bot.edit_message_text(
+            "⚠️ Please set your preference first!\n\nChoose who you want to see:",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup
+        )
         return
     
     preference = user.get('preference', 'both')
@@ -50,22 +51,19 @@ async def view_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "is_active": True
     }
     
-    # Apply gender filter based on preference
     if preference == 'male':
         query_filter["gender"] = "male"
     elif preference == 'female':
         query_filter["gender"] = "female"
-    # 'both' - show all genders
     
-    # Get already liked users to exclude them
+    # Get already liked users
     liked_users = db.get_collection("likes").distinct("to_user", {"from_user": user_id})
     query_filter["user_id"] = {"$nin": liked_users + [user_id]}
     
-    # Get profiles based on location or random
+    # Get profiles
     profiles = []
     
     if my_profile.get('latitude') and my_profile.get('longitude'):
-        # Get nearby profiles (within 50km)
         nearby = get_nearby_profiles(
             my_profile['latitude'],
             my_profile['longitude'],
@@ -73,55 +71,42 @@ async def view_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_distance_km=50
         )
         profiles = list(nearby)
-        
-        # Sort by distance
-        for p in profiles:
-            if p.get('latitude') and p.get('longitude'):
-                p['distance'] = calculate_distance(
-                    my_profile['latitude'], my_profile['longitude'],
-                    p['latitude'], p['longitude']
-                )
-            else:
-                p['distance'] = float('inf')
-        profiles.sort(key=lambda x: x.get('distance', float('inf')))
-    
-    # If no nearby profiles, get random ones
-    if not profiles:
+    else:
         profiles = list(db.get_collection("profiles").find(query_filter).limit(100))
-        # Shuffle for randomness
-        import random
         random.shuffle(profiles)
     
     if not profiles:
-        keyboard = [
-            [InlineKeyboardButton("🔄 Refresh", callback_data="view_profiles")],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = "😔 **No profiles found!**\n\n"
-        msg += "Possible reasons:\n"
-        msg += "├ ─ No users matching your preference\n"
-        msg += "├ ─ You've liked everyone available\n"
-        msg += "└ ─ Try changing your preference\n\n"
-        msg += "🔄 Click Refresh to check again."
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        btn_refresh = types.InlineKeyboardButton("🔄 Refresh", callback_data="view_profiles")
+        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+        markup.add(btn_refresh, btn_menu)
         
-        if query:
-            await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+        bot.edit_message_text(
+            "😔 **No profiles found!**\n\n"
+            "Possible reasons:\n"
+            "├ ─ No users matching your preference\n"
+            "├ ─ You've liked everyone available\n"
+            "└ ─ Try changing your preference\n\n"
+            "🔄 Click Refresh to check again.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup
+        )
         return
     
     # Store session
     active_sessions[user_id] = {
         'profiles': profiles,
         'current_index': 0,
-        'preference': preference
+        'message_id': call.message.message_id,
+        'chat_id': call.message.chat.id
     }
     
     # Show first profile
-    await show_profile(update, context, user_id)
+    show_profile(bot, user_id)
 
-async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+
+def show_profile(bot, user_id):
     """Display current profile to user"""
     session = active_sessions.get(user_id)
     if not session:
@@ -132,19 +117,19 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
     
     if index >= len(profiles):
         # No more profiles
-        keyboard = [
-            [InlineKeyboardButton("🔄 Start Over", callback_data="view_profiles")],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = "🏁 **You've viewed all profiles!**\n\n"
-        msg += "No more profiles available right now.\n"
-        msg += "Come back later for new matches!"
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        btn_restart = types.InlineKeyboardButton("🔄 Start Over", callback_data="view_profiles")
+        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+        markup.add(btn_restart, btn_menu)
         
-        if hasattr(update, 'callback_query') and update.callback_query:
-            await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+        bot.edit_message_text(
+            "🏁 **You've viewed all profiles!**\n\n"
+            "No more profiles available right now.\n"
+            "Come back later for new matches!",
+            chat_id=session['chat_id'],
+            message_id=session['message_id'],
+            reply_markup=markup
+        )
         
         # Clean up session
         del active_sessions[user_id]
@@ -157,9 +142,6 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
     text += f"🎂 Age: {profile['age']}\n"
     text += f"📍 {profile.get('location_text', 'Location not specified')}\n"
     
-    if profile.get('distance') and profile['distance'] != float('inf'):
-        text += f"📏 Distance: {profile['distance']:.1f} km\n"
-    
     if profile.get('about'):
         about_preview = profile['about'][:200]
         if len(profile['about']) > 200:
@@ -169,66 +151,46 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
     text += f"\n👥 Profile {index + 1} of {len(profiles)}"
     
     # Build action buttons
-    keyboard = [
-        [
-            InlineKeyboardButton("❤️ LIKE", callback_data=f"like_{profile['user_id']}"),
-            InlineKeyboardButton("💬 CHAT", callback_data=f"chat_{profile['user_id']}")
-        ],
-        [
-            InlineKeyboardButton("⏭️ SKIP", callback_data="skip_profile"),
-            InlineKeyboardButton("🛑 STOP", callback_data="stop_viewing")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_like = types.InlineKeyboardButton("❤️ LIKE", callback_data=f"like_{profile['user_id']}")
+    btn_chat = types.InlineKeyboardButton("💬 CHAT", callback_data=f"chat_{profile['user_id']}")
+    btn_skip = types.InlineKeyboardButton("⏭️ SKIP", callback_data="skip_profile")
+    btn_stop = types.InlineKeyboardButton("🛑 STOP", callback_data="stop_viewing")
+    markup.add(btn_like, btn_chat, btn_skip, btn_stop)
     
-    # Send media if available
+    # Send or edit message with media
     if profile.get('media') and len(profile['media']) > 0:
-        # Try to send as media group first
-        media_group = []
-        for i, media_url in enumerate(profile['media'][:3]):
-            if media_url.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')):
-                media_group.append(InputMediaPhoto(media=media_url, caption=text if i == 0 else None))
-            else:
-                media_group.append(InputMediaVideo(media=media_url, caption=text if i == 0 else None))
-        
-        try:
-            # Delete previous message if exists
-            if hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.delete_message()
-            
-            # Send media group
-            if hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.message.reply_media_group(media_group)
-                await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown', disable_web_page_preview=True)
-            else:
-                await update.message.reply_media_group(media_group)
-                await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown', disable_web_page_preview=True)
-        except Exception as e:
-            logger.error(f"Media group error: {e}")
-            # Fallback to single message
-            if hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-            else:
-                await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        # For now, send text only (media handling can be added later)
+        bot.edit_message_text(
+            text,
+            chat_id=session['chat_id'],
+            message_id=session['message_id'],
+            reply_markup=markup
+        )
     else:
-        # No media, just text
-        if hasattr(update, 'callback_query') and update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        bot.edit_message_text(
+            text,
+            chat_id=session['chat_id'],
+            message_id=session['message_id'],
+            reply_markup=markup
+        )
 
-async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Like the current profile and move to next"""
-    query = update.callback_query
-    await query.answer("❤️ Liked! Moving to next profile...")
+
+def handle_like_callback(bot, call, user_states, user_temp_data):
+    """Like the current profile"""
+    user_id = call.from_user.id
+    target_id = int(call.data.split('_')[1])
     
-    user_id = update.effective_user.id
-    target_id = int(query.data.split('_')[1])
+    bot.answer_callback_query(call.id, "❤️ Liked! Moving to next...")
     
     # Get target profile
     target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
     if not target_profile:
-        await query.edit_message_text("❌ Profile not found!")
+        bot.edit_message_text(
+            "❌ Profile not found!",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
         return
     
     # Check if already liked
@@ -237,14 +199,12 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "to_user": target_id
     })
     
-    if existing_like:
-        await query.answer("You already liked this profile!", show_alert=True)
-    else:
+    if not existing_like:
         # Create like record
         like_data = {
             "from_user": user_id,
             "to_user": target_id,
-            "from_name": query.from_user.first_name,
+            "from_name": call.from_user.first_name,
             "to_name": target_profile.get('name'),
             "is_mutual": False,
             "is_read": False,
@@ -257,21 +217,21 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "user_id": target_id,
             "type": "like",
             "from_user": user_id,
-            "from_name": query.from_user.first_name,
-            "message": f"{query.from_user.first_name} liked your profile!",
+            "from_name": call.from_user.first_name,
+            "message": f"❤️ {call.from_user.first_name} liked your profile!",
             "is_read": False,
             "created_at": datetime.utcnow()
         }
         db.get_collection("notifications").insert_one(notification)
         
-        # Check for mutual like (if target has also liked this user)
+        # Check for mutual like
         mutual = db.get_collection("likes").find_one({
             "from_user": target_id,
             "to_user": user_id
         })
         
         if mutual:
-            # Update both records as mutual
+            # Update as mutual
             db.get_collection("likes").update_many(
                 {"$or": [
                     {"from_user": user_id, "to_user": target_id},
@@ -280,78 +240,83 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"$set": {"is_mutual": True}}
             )
             
-            # Send mutual match notification
-            match_notification = {
-                "user_id": target_id,
-                "type": "mutual_match",
-                "from_user": user_id,
-                "from_name": query.from_user.first_name,
-                "message": f"🎉 It's a match! You and {query.from_user.first_name} liked each other!",
-                "is_read": False,
-                "created_at": datetime.utcnow()
-            }
-            db.get_collection("notifications").insert_one(match_notification)
+            # Send mutual match notification to both
+            for uid, name in [(target_id, call.from_user.first_name), (user_id, target_profile.get('name'))]:
+                match_notification = {
+                    "user_id": uid,
+                    "type": "mutual_match",
+                    "from_user": user_id if uid == target_id else target_id,
+                    "from_name": name,
+                    "message": f"🎉 It's a match! You and {name} liked each other!",
+                    "is_read": False,
+                    "created_at": datetime.utcnow()
+                }
+                db.get_collection("notifications").insert_one(match_notification)
             
-            match_notification2 = {
-                "user_id": user_id,
-                "type": "mutual_match",
-                "from_user": target_id,
-                "from_name": target_profile.get('name'),
-                "message": f"🎉 It's a match! You and {target_profile.get('name')} liked each other!",
-                "is_read": False,
-                "created_at": datetime.utcnow()
-            }
-            db.get_collection("notifications").insert_one(match_notification2)
-            
-            await query.answer("🎉 It's a match! 🎉", show_alert=True)
+            bot.answer_callback_query(call.id, "🎉 It's a match! 🎉", show_alert=True)
     
     # Move to next profile
     session = active_sessions.get(user_id)
     if session:
         session['current_index'] += 1
-        await show_profile(update, context, user_id)
+        show_profile(bot, user_id)
     else:
-        await view_profiles(update, context)
+        # Create new view profiles callback
+        handle_view_profiles(bot, call, user_states, user_temp_data)
 
-async def skip_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Skip current profile and move to next"""
-    query = update.callback_query
-    await query.answer("⏭️ Skipped")
+
+def handle_skip_callback(bot, call, user_states, user_temp_data):
+    """Skip current profile"""
+    user_id = call.from_user.id
     
-    user_id = update.effective_user.id
+    bot.answer_callback_query(call.id, "⏭️ Skipped")
     
     session = active_sessions.get(user_id)
     if session:
         session['current_index'] += 1
-        await show_profile(update, context, user_id)
+        show_profile(bot, user_id)
     else:
-        await view_profiles(update, context)
+        handle_view_profiles(bot, call, user_states, user_temp_data)
 
-async def stop_viewing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop viewing profiles and return to main menu"""
-    query = update.callback_query
-    await query.answer()
+
+def handle_stop_callback(bot, call, user_states, user_temp_data):
+    """Stop viewing profiles"""
+    user_id = call.from_user.id
     
-    user_id = update.effective_user.id
+    bot.answer_callback_query(call.id)
     
     # Clean up session
     if user_id in active_sessions:
         del active_sessions[user_id]
     
     # Return to main menu
-    from handlers.profile import show_main_menu
-    await show_main_menu(update, context)
-
-async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's own profile"""
-    query = update.callback_query
-    await query.answer()
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_profile = types.InlineKeyboardButton("👤 MY PROFILE", callback_data="my_profile")
+    btn_view = types.InlineKeyboardButton("👀 VIEW PROFILES", callback_data="view_profiles")
+    btn_notify = types.InlineKeyboardButton("🔔 NOTIFICATIONS", callback_data="notifications")
+    markup.add(btn_profile, btn_view, btn_notify)
     
-    user_id = update.effective_user.id
+    bot.edit_message_text(
+        "🏠 **Main Menu**\n\nViewing stopped. Choose an option:",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
+
+
+def handle_my_profile(bot, call):
+    """Show user's own profile"""
+    user_id = call.from_user.id
+    
+    bot.answer_callback_query(call.id)
     
     profile = db.get_collection("profiles").find_one({"user_id": user_id})
     if not profile:
-        await query.edit_message_text("❌ No profile found. Use /start to create one.")
+        bot.edit_message_text(
+            "❌ No profile found. Use /start to create one.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
         return
     
     # Get stats
@@ -371,27 +336,14 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"📷 Media: {len(profile.get('media', []))} file(s)"
     
     # Action buttons
-    keyboard = [
-        [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn_edit = types.InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")
+    btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+    markup.add(btn_edit, btn_menu)
     
-    # Send profile with media if available
-    if profile.get('media') and len(profile['media']) > 0:
-        media_group = []
-        for i, media_url in enumerate(profile['media'][:3]):
-            if media_url.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')):
-                media_group.append(InputMediaPhoto(media=media_url, caption=text if i == 0 else None))
-            else:
-                media_group.append(InputMediaVideo(media=media_url, caption=text if i == 0 else None))
-        
-        try:
-            await query.delete_message()
-            await query.message.reply_media_group(media_group)
-            await query.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Media error in my_profile: {e}")
-            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    bot.edit_message_text(
+        text,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
