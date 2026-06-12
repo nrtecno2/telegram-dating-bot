@@ -1,20 +1,17 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
 from datetime import datetime
+from telebot import types
 from database import get_db
 
 logger = logging.getLogger(__name__)
-
 db = get_db()
 
-async def view_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def handle_notifications(bot, call):
     """Show all unread notifications for user"""
-    query = update.callback_query
-    user_id = update.effective_user.id if update.effective_user else update.message.from_user.id
+    user_id = call.from_user.id
     
-    if query:
-        await query.answer()
+    bot.answer_callback_query(call.id)
     
     # Get unread notifications
     notifications = list(db.get_collection("notifications").find({
@@ -23,14 +20,19 @@ async def view_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }).sort("created_at", -1))
     
     if not notifications:
-        msg = "🔔 **No new notifications**\n\nYou're all caught up!"
-        if query:
-            await query.edit_message_text(msg, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(msg, parse_mode='Markdown')
+        markup = types.InlineKeyboardMarkup()
+        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+        markup.add(btn_menu)
+        
+        bot.edit_message_text(
+            "🔔 **No new notifications**\n\nYou're all caught up!",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup
+        )
         return
     
-    # Mark as read
+    # Mark all as read
     db.get_collection("notifications").update_many(
         {"user_id": user_id, "is_read": False},
         {"$set": {"is_read": True}}
@@ -38,43 +40,66 @@ async def view_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Build notification message
     message = f"🔔 **{len(notifications)} New Notification(s)**\n\n"
-    keyboard = []
+    markup = types.InlineKeyboardMarkup(row_width=1)
     
     for notif in notifications:
-        notif_type = notif['type']
+        notif_type = notif.get('type')
+        from_name = notif.get('from_name', 'Someone')
+        from_user_id = notif.get('from_user_id')
         
         if notif_type == 'like':
-            message += f"❤️ **{notif['from_name']} liked your profile!**\n"
-            keyboard.append([InlineKeyboardButton(
-                f"👤 View {notif['from_name']}", 
-                callback_data=f"view_user_{notif['from_user']}"
-            )])
-            
+            message += f"❤️ **{from_name} liked your profile!**\n"
+            if from_user_id:
+                btn = types.InlineKeyboardButton(
+                    f"👤 View {from_name}",
+                    callback_data=f"view_user_{from_user_id}"
+                )
+                markup.add(btn)
+        
+        elif notif_type == 'mutual_match':
+            message += f"🎉 **Mutual Match!** {from_name} liked you back!\n"
+            if from_user_id:
+                btn = types.InlineKeyboardButton(
+                    f"💬 Chat with {from_name}",
+                    callback_data=f"chat_{from_user_id}"
+                )
+                markup.add(btn)
+        
         elif notif_type == 'message':
-            message += f"💬 **{notif['from_name']} texted you:**\n"
-            message += f"_{notif['message_preview']}_\n"
-            keyboard.append([InlineKeyboardButton(
-                f"💬 Chat with {notif['from_name']}", 
-                callback_data=f"chat_{notif['from_user']}"
-            )])
+            msg_preview = notif.get('message', '')[:50]
+            message += f"💬 **{from_name} texted you:**\n"
+            message += f"_{msg_preview}_\n"
+            if from_user_id:
+                btn = types.InlineKeyboardButton(
+                    f"💬 Reply to {from_name}",
+                    callback_data=f"chat_{from_user_id}"
+                )
+                markup.add(btn)
+        
+        elif notif_type == 'system':
+            message += f"📢 **System:** {notif.get('message', '')}\n"
         
         message += "\n---\n"
     
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+    markup.add(btn_menu)
     
-    if query:
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    bot.edit_message_text(
+        message,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
 
-async def send_like_notification(context: ContextTypes.DEFAULT_TYPE, from_user_id: int, to_user_id: int, from_name: str):
+
+def send_like_notification(bot, to_user_id, from_user_id, from_name):
     """Send like notification to user"""
     notification = {
         "user_id": to_user_id,
         "type": "like",
-        "from_user": from_user_id,
+        "from_user_id": from_user_id,
         "from_name": from_name,
+        "message": f"❤️ {from_name} liked your profile!",
         "is_read": False,
         "created_at": datetime.utcnow()
     }
@@ -84,30 +109,119 @@ async def send_like_notification(context: ContextTypes.DEFAULT_TYPE, from_user_i
     like_data = {
         "from_user": from_user_id,
         "to_user": to_user_id,
+        "from_name": from_name,
+        "to_name": None,
         "is_mutual": False,
+        "is_read": False,
         "created_at": datetime.utcnow()
     }
     db.get_collection("likes").insert_one(like_data)
     
     # Check for mutual like
-    mutual_like = db.get_collection("likes").find_one({
-        "from_user": to_user_id,
-        "to_user": from_user_id
+    check_mutual_like(bot, from_user_id, to_user_id)
+
+
+def send_message_notification(bot, to_user_id, from_user_id, from_name, message_preview):
+    """Send message notification to user"""
+    notification = {
+        "user_id": to_user_id,
+        "type": "message",
+        "from_user_id": from_user_id,
+        "from_name": from_name,
+        "message": message_preview[:100],
+        "is_read": False,
+        "created_at": datetime.utcnow()
+    }
+    db.get_collection("notifications").insert_one(notification)
+
+
+def send_mutual_match_notification(bot, user1_id, user2_id, user1_name, user2_name):
+    """Send mutual match notification to both users"""
+    # Notification for user1
+    notif1 = {
+        "user_id": user1_id,
+        "type": "mutual_match",
+        "from_user_id": user2_id,
+        "from_name": user2_name,
+        "message": f"🎉 It's a match! You and {user2_name} liked each other!",
+        "is_read": False,
+        "created_at": datetime.utcnow()
+    }
+    db.get_collection("notifications").insert_one(notif1)
+    
+    # Notification for user2
+    notif2 = {
+        "user_id": user2_id,
+        "type": "mutual_match",
+        "from_user_id": user1_id,
+        "from_name": user1_name,
+        "message": f"🎉 It's a match! You and {user1_name} liked each other!",
+        "is_read": False,
+        "created_at": datetime.utcnow()
+    }
+    db.get_collection("notifications").insert_one(notif2)
+
+
+def check_mutual_like(bot, user1_id, user2_id):
+    """Check if two users have liked each other"""
+    like1 = db.get_collection("likes").find_one({
+        "from_user": user1_id,
+        "to_user": user2_id
     })
     
-    if mutual_like:
-        await send_mutual_like_notification(context, from_user_id, to_user_id)
+    like2 = db.get_collection("likes").find_one({
+        "from_user": user2_id,
+        "to_user": user1_id
+    })
+    
+    if like1 and like2:
+        # Update both as mutual
+        db.get_collection("likes").update_many(
+            {"$or": [
+                {"from_user": user1_id, "to_user": user2_id},
+                {"from_user": user2_id, "to_user": user1_id}
+            ]},
+            {"$set": {"is_mutual": True}}
+        )
+        
+        # Get names
+        user1 = db.get_collection("users").find_one({"user_id": user1_id})
+        user2 = db.get_collection("users").find_one({"user_id": user2_id})
+        
+        user1_name = user1.get('first_name', 'Someone') if user1 else 'Someone'
+        user2_name = user2.get('first_name', 'Someone') if user2 else 'Someone'
+        
+        # Send mutual match notifications
+        send_mutual_match_notification(bot, user1_id, user2_id, user1_name, user2_name)
+        
+        return True
+    
+    return False
 
-async def send_mutual_like_notification(context: ContextTypes.DEFAULT_TYPE, user1: int, user2: int):
-    """Send mutual like notification to both users"""
-    for user_id in [user1, user2]:
-        notification = {
-            "user_id": user_id,
-            "type": "mutual_like",
-            "from_user": user1 if user_id == user2 else user2,
-            "from_name": "Someone",
-            "is_read": False,
-            "created_at": datetime.utcnow(),
-            "is_mutual": True
-        }
-        db.get_collection("notifications").insert_one(notification)
+
+def get_unread_count(user_id):
+    """Get unread notification count for user"""
+    return db.get_collection("notifications").count_documents({
+        "user_id": user_id,
+        "is_read": False
+    })
+
+
+def mark_all_as_read(user_id):
+    """Mark all notifications as read for user"""
+    result = db.get_collection("notifications").update_many(
+        {"user_id": user_id, "is_read": False},
+        {"$set": {"is_read": True}}
+    )
+    return result.modified_count
+
+
+def delete_old_notifications(days=30):
+    """Delete notifications older than specified days"""
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    
+    result = db.get_collection("notifications").delete_many({
+        "created_at": {"$lt": cutoff}
+    })
+    return result.deleted_count
