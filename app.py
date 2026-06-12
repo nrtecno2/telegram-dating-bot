@@ -1,3 +1,4 @@
+from handlers.start import register_start_handler
 import os
 import telebot
 
