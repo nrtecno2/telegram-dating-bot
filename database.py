@@ -7,10 +7,9 @@ db = sqlite3.connect(
 
 cursor = db.cursor()
 
-
-# ==========================
-# USERS TABLE
-# ==========================
+# =========================
+# USERS
+# =========================
 
 cursor.execute("""
 
@@ -30,17 +29,17 @@ CREATE TABLE IF NOT EXISTS users(
 
     preference TEXT,
 
-    completed INTEGER DEFAULT 0
+    completed INTEGER DEFAULT 0,
+
+    current_step TEXT
 
 )
 
 """)
 
-
-
-# ==========================
-# MEDIA TABLE
-# ==========================
+# =========================
+# MEDIA
+# =========================
 
 cursor.execute("""
 
@@ -58,11 +57,9 @@ CREATE TABLE IF NOT EXISTS media(
 
 """)
 
-
-
-# ==========================
-# LIKES TABLE
-# ==========================
+# =========================
+# LIKES
+# =========================
 
 cursor.execute("""
 
@@ -78,11 +75,9 @@ CREATE TABLE IF NOT EXISTS likes(
 
 """)
 
-
-
-# ==========================
-# NOTIFICATIONS TABLE
-# ==========================
+# =========================
+# NOTIFICATIONS
+# =========================
 
 cursor.execute("""
 
@@ -102,14 +97,54 @@ CREATE TABLE IF NOT EXISTS notifications(
 
 """)
 
+# =========================
+# CHAT REQUESTS
+# =========================
 
+cursor.execute("""
+
+CREATE TABLE IF NOT EXISTS chat_requests(
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    from_user INTEGER,
+
+    to_user INTEGER,
+
+    status INTEGER DEFAULT 0
+
+)
+
+""")
+
+# =========================
+# MESSAGES
+# =========================
+
+cursor.execute("""
+
+CREATE TABLE IF NOT EXISTS messages(
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    from_user INTEGER,
+
+    to_user INTEGER,
+
+    message TEXT,
+
+    send_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+)
+
+""")
 
 db.commit()
 
 
-# ==========================
+# =========================
 # USER FUNCTIONS
-# ==========================
+# =========================
 
 def user_exists(user_id):
 
@@ -124,21 +159,29 @@ def user_exists(user_id):
     return cursor.fetchone()
 
 
-
 def add_user(user_id):
 
     if not user_exists(user_id):
 
         cursor.execute(
 
-            "INSERT INTO users(user_id) VALUES(?)",
+            """
+
+            INSERT INTO users(
+
+            user_id
+
+            )
+
+            VALUES(?)
+
+            """,
 
             (user_id,)
 
         )
 
         db.commit()
-
 
 
 def get_user(user_id):
@@ -152,7 +195,6 @@ def get_user(user_id):
     )
 
     return cursor.fetchone()
-
 
 
 def update_field(
@@ -182,10 +224,9 @@ def update_field(
     db.commit()
 
 
-
-# ==========================
-# MEDIA FUNCTIONS
-# ==========================
+# =========================
+# MEDIA
+# =========================
 
 def add_media(
 
@@ -238,7 +279,6 @@ def add_media(
     db.commit()
 
 
-
 def get_media(user_id):
 
     cursor.execute(
@@ -252,10 +292,9 @@ def get_media(user_id):
     return cursor.fetchall()
 
 
-
-# ==========================
-# LIKE FUNCTIONS
-# ==========================
+# =========================
+# LIKES
+# =========================
 
 def add_like(
 
@@ -300,10 +339,9 @@ def add_like(
     db.commit()
 
 
-
-# ==========================
-# NOTIFICATION FUNCTIONS
-# ==========================
+# =========================
+# NOTIFICATIONS
+# =========================
 
 def add_notification(
 
@@ -356,7 +394,6 @@ def add_notification(
     db.commit()
 
 
-
 def get_notifications(
 
     user_id
@@ -367,7 +404,9 @@ def get_notifications(
 
         """
 
-        SELECT * FROM notifications
+        SELECT *
+
+        FROM notifications
 
         WHERE user_id=?
 
