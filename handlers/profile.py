@@ -1,289 +1,373 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ContextTypes, ConversationHandler
 from datetime import datetime
+from telebot import types
 from database import get_db
-from utils.states import *
 from utils.storage import upload_media_to_channel
 
 logger = logging.getLogger(__name__)
-
 db = get_db()
 
-async def create_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start profile creation process"""
-    user_id = update.effective_user.id
-    
-    # Check if profile already exists
-    existing = db.get_collection("profiles").find_one({"user_id": user_id})
-    if existing:
-        keyboard = [[InlineKeyboardButton("📝 Edit Profile", callback_data="edit_profile")],
-                    [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "⚠️ You already have a profile!\n\n"
-            "What would you like to do?",
-            reply_markup=reply_markup
-        )
-        return ConversationHandler.END
-    
-    await update.message.reply_text(
-        "🌟 **Let's create your profile!** 🌟\n\n"
-        "Please send your **Name**:",
-        parse_mode='Markdown'
-    )
-    return NAME
 
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get user's name"""
-    name = update.message.text.strip()
-    if len(name) < 2 or len(name) > 50:
-        await update.message.reply_text("❌ Name must be 2-50 characters. Try again:")
-        return NAME
+def handle_name(bot, message, user_states, user_temp_data):
+    """Handle name input"""
+    user_id = message.from_user.id
+    name = message.text.strip()
     
-    context.user_data['profile_name'] = name
-    context.user_data['temp_profile'] = {}
+    if len(name) < 2 or len(name) > 50:
+        bot.reply_to(message, "❌ Name must be 2-50 characters. Try again:")
+        return
+    
+    user_temp_data[user_id]['name'] = name
+    user_states[user_id] = "awaiting_gender"
     
     # Gender selection keyboard
-    keyboard = [[InlineKeyboardButton("👨 Male", callback_data="gender_male")],
-                [InlineKeyboardButton("👩 Female", callback_data="gender_female")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_male = types.InlineKeyboardButton("👨 Male", callback_data="gender_male")
+    btn_female = types.InlineKeyboardButton("👩 Female", callback_data="gender_female")
+    markup.add(btn_male, btn_female)
     
-    await update.message.reply_text(
-        f"✅ Name: {name}\n\n"
-        f"Now select your **Gender**:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
+    bot.reply_to(
+        message,
+        f"✅ Name: {name}\n\nNow select your **Gender**:",
+        reply_markup=markup
     )
-    return GENDER
 
-async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get user's gender from callback"""
-    query = update.callback_query
-    await query.answer()
+
+def handle_gender_callback(bot, call, user_states, user_temp_data):
+    """Handle gender selection callback"""
+    user_id = call.from_user.id
+    gender = call.data.split('_')[1]
     
-    gender = query.data.split('_')[1]
-    context.user_data['temp_profile']['gender'] = gender
+    bot.answer_callback_query(call.id)
     
-    await query.edit_message_text(
+    user_temp_data[user_id]['gender'] = gender
+    user_states[user_id] = "awaiting_age"
+    
+    bot.edit_message_text(
         f"✅ Gender: {'Male' if gender == 'male' else 'Female'}\n\n"
         f"Now send your **Age** (18-100):",
-        parse_mode='Markdown'
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id
     )
-    return AGE
 
-async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get user's age"""
+
+def handle_age(bot, message, user_states, user_temp_data):
+    """Handle age input"""
+    user_id = message.from_user.id
+    
     try:
-        age = int(update.message.text.strip())
+        age = int(message.text.strip())
         if age < 18 or age > 100:
             raise ValueError
     except:
-        await update.message.reply_text("❌ Invalid age! Send number between 18-100:")
-        return AGE
+        bot.reply_to(message, "❌ Invalid age! Send number between 18-100:")
+        return
     
-    context.user_data['temp_profile']['age'] = age
+    user_temp_data[user_id]['age'] = age
+    user_states[user_id] = "awaiting_location"
     
-    await update.message.reply_text(
+    # Location keyboard with option to share live location
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    btn_location = types.KeyboardButton("📍 Send Live Location", request_location=True)
+    btn_skip = types.KeyboardButton("⏭️ Skip Location")
+    markup.add(btn_location, btn_skip)
+    
+    bot.reply_to(
+        message,
         f"✅ Age: {age}\n\n"
-        f"Now send your **Location** (City/Area):",
-        parse_mode='Markdown'
+        f"Now send your **Location** (City/Area):\n"
+        f"Or share live location for better matches:",
+        reply_markup=markup
     )
-    return LOCATION
 
-async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get user's location"""
-    location = update.message.text.strip()
-    if len(location) < 2:
-        await update.message.reply_text("❌ Invalid location. Try again:")
-        return LOCATION
-    
-    context.user_data['temp_profile']['location_text'] = location
-    
-    # Optional: Get coordinates via location share
-    keyboard = [[KeyboardButton("📍 Send Live Location", request_location=True)],
-                [KeyboardButton("⏭️ Skip")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    
-    await update.message.reply_text(
-        f"✅ Location: {location}\n\n"
-        f"You can share live location for better matches (optional):",
-        reply_markup=reply_markup
-    )
-    return LOCATION_COORDS
 
-async def get_location_coords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get location coordinates if shared"""
-    if update.message.location:
-        context.user_data['temp_profile']['latitude'] = update.message.location.latitude
-        context.user_data['temp_profile']['longitude'] = update.message.location.longitude
+def handle_location(bot, message, user_states, user_temp_data):
+    """Handle location (live location or coordinates)"""
+    user_id = message.from_user.id
     
-    await update.message.reply_text(
-        f"Now send your **About** (max 500 chars):\n"
-        f"Or send /skip to skip",
-        parse_mode='Markdown'
-    )
-    return ABOUT
-
-async def get_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get user's about description"""
-    if update.message.text and update.message.text == '/skip':
-        context.user_data['temp_profile']['about'] = ""
+    if message.location:
+        # User shared live location
+        user_temp_data[user_id]['latitude'] = message.location.latitude
+        user_temp_data[user_id]['longitude'] = message.location.longitude
+        user_temp_data[user_id]['location_text'] = f"{message.location.latitude}, {message.location.longitude}"
+        
+        user_states[user_id] = "awaiting_about"
+        
+        # Remove keyboard
+        markup = types.ReplyKeyboardRemove()
+        
+        bot.reply_to(
+            message,
+            f"✅ Location saved! (Coordinates received)\n\n"
+            f"Now send your **About** (max 500 chars):\n"
+            f"Or send /skip to skip this step",
+            reply_markup=markup
+        )
     else:
-        about = update.message.text.strip()
-        if len(about) > 500:
-            await update.message.reply_text("❌ About too long! Max 500 chars:")
-            return ABOUT
-        context.user_data['temp_profile']['about'] = about
+        # Will be handled by handle_location_text
+        pass
+
+
+def handle_location_text(bot, message, user_states, user_temp_data):
+    """Handle text location input"""
+    user_id = message.from_user.id
+    location = message.text.strip()
     
-    await update.message.reply_text(
+    if location == "⏭️ Skip Location":
+        user_temp_data[user_id]['location_text'] = ""
+        user_states[user_id] = "awaiting_about"
+        
+        # Remove keyboard
+        markup = types.ReplyKeyboardRemove()
+        
+        bot.reply_to(
+            message,
+            f"✅ Location skipped!\n\n"
+            f"Now send your **About** (max 500 chars):\n"
+            f"Or send /skip to skip this step",
+            reply_markup=markup
+        )
+        return
+    
+    if len(location) < 2:
+        bot.reply_to(message, "❌ Invalid location. Try again:")
+        return
+    
+    user_temp_data[user_id]['location_text'] = location
+    user_states[user_id] = "awaiting_about"
+    
+    # Remove keyboard
+    markup = types.ReplyKeyboardRemove()
+    
+    bot.reply_to(
+        message,
+        f"✅ Location: {location}\n\n"
+        f"Now send your **About** (max 500 chars):\n"
+        f"Or send /skip to skip this step",
+        reply_markup=markup
+    )
+
+
+def handle_about(bot, message, user_states, user_temp_data):
+    """Handle about text input"""
+    user_id = message.from_user.id
+    
+    if message.text and message.text == '/skip':
+        user_temp_data[user_id]['about'] = ""
+    else:
+        about = message.text.strip()
+        if len(about) > 500:
+            bot.reply_to(message, "❌ About too long! Max 500 characters. Try again:")
+            return
+        user_temp_data[user_id]['about'] = about
+    
+    user_states[user_id] = "awaiting_media"
+    user_temp_data[user_id]['media_list'] = []
+    
+    bot.reply_to(
+        message,
         f"✅ About saved!\n\n"
         f"Now send **1-3 photos/videos**\n"
-        f"Send media one by one, then click /done",
+        f"Send media one by one, then send /done when finished\n\n"
+        f"📷 Remaining slots: 3",
         parse_mode='Markdown'
     )
-    return MEDIA
 
-async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collect user media"""
-    if 'media_list' not in context.user_data:
-        context.user_data['media_list'] = []
+
+def handle_media(bot, message, user_states, user_temp_data):
+    """Handle media (photos/videos) input"""
+    user_id = message.from_user.id
+    media_list = user_temp_data[user_id].get('media_list', [])
     
-    if len(context.user_data['media_list']) >= 3:
-        await update.message.reply_text("❌ Max 3 media files already!")
-        return MEDIA
+    if len(media_list) >= 3:
+        bot.reply_to(message, "❌ Max 3 media files already! Send /done to continue.")
+        return
     
-    # Handle photo
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = 'photo'
-    # Handle video
-    elif update.message.video:
-        file_id = update.message.video.file_id
-        file_type = 'video'
+    # Get file_id based on media type
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        media_type = 'photo'
+    elif message.video:
+        file_id = message.video.file_id
+        media_type = 'video'
     else:
-        await update.message.reply_text("❌ Send photo or video only!")
-        return MEDIA
+        bot.reply_to(message, "❌ Please send photo or video only!")
+        return
     
-    context.user_data['media_list'].append({
+    media_list.append({
         'file_id': file_id,
-        'type': file_type
+        'type': media_type
     })
     
-    remaining = 3 - len(context.user_data['media_list'])
-    await update.message.reply_text(
-        f"✅ Media {len(context.user_data['media_list'])}/3 added!\n"
-        f"{remaining} remaining. Send more or /done"
+    user_temp_data[user_id]['media_list'] = media_list
+    remaining = 3 - len(media_list)
+    
+    bot.reply_to(
+        message,
+        f"✅ Media {len(media_list)}/3 added!\n"
+        f"📷 {remaining} remaining. Send more or /done"
     )
-    return MEDIA
 
-async def confirm_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show profile preview and confirm"""
-    keyboard = [[InlineKeyboardButton("✅ Confirm Profile", callback_data="confirm_yes")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="confirm_no")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    temp = context.user_data['temp_profile']
-    media_preview = "\n".join([f"- {m['type']}" for m in context.user_data.get('media_list', [])])
-    
-    await update.message.reply_text(
-        f"📋 **Profile Preview**\n\n"
-        f"👤 Name: {context.user_data['profile_name']}\n"
-        f"⚧ Gender: {temp['gender']}\n"
-        f"🎂 Age: {temp['age']}\n"
-        f"📍 Location: {temp['location_text']}\n"
-        f"📝 About: {temp.get('about', 'Not provided')[:100]}\n"
-        f"📷 Media: {len(context.user_data.get('media_list', []))} file(s)\n{media_preview}\n\n"
-        f"Confirm to save?",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    return CONFIRM
 
-async def save_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save profile to database"""
-    query = update.callback_query
-    await query.answer()
+def confirm_profile(bot, message, user_states, user_temp_data):
+    """Show profile preview and ask for confirmation"""
+    user_id = message.from_user.id
+    temp = user_temp_data.get(user_id, {})
+    media_list = temp.get('media_list', [])
     
-    if query.data == "confirm_no":
-        await query.edit_message_text("❌ Profile creation cancelled.")
-        context.user_data.clear()
-        return ConversationHandler.END
+    if not temp.get('name') or not temp.get('gender') or not temp.get('age'):
+        bot.reply_to(message, "❌ Profile incomplete! Please start over with /start")
+        return
     
-    user_id = update.effective_user.id
+    # Build preview text
+    preview = f"📋 **Profile Preview**\n\n"
+    preview += f"👤 Name: {temp.get('name')}\n"
+    preview += f"⚧ Gender: {'Male' if temp.get('gender') == 'male' else 'Female'}\n"
+    preview += f"🎂 Age: {temp.get('age')}\n"
+    preview += f"📍 Location: {temp.get('location_text', 'Not provided')}\n"
+    preview += f"📝 About: {temp.get('about', 'Not provided')[:100]}\n"
+    preview += f"📷 Media: {len(media_list)} file(s)\n\n"
+    preview += f"Confirm to save your profile?"
+    
+    # Confirmation buttons
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_yes = types.InlineKeyboardButton("✅ Confirm", callback_data="confirm_yes")
+    btn_no = types.InlineKeyboardButton("❌ Cancel", callback_data="confirm_no")
+    markup.add(btn_yes, btn_no)
+    
+    user_states[user_id] = "awaiting_confirm"
+    
+    bot.reply_to(message, preview, reply_markup=markup)
+
+
+def handle_confirm_callback(bot, call, user_states, user_temp_data):
+    """Handle profile confirmation callback"""
+    user_id = call.from_user.id
+    action = call.data.split('_')[1]
+    
+    bot.answer_callback_query(call.id)
+    
+    if action == "no":
+        # Cancel profile creation
+        if user_id in user_states:
+            del user_states[user_id]
+        if user_id in user_temp_data:
+            del user_temp_data[user_id]
+        
+        bot.edit_message_text(
+            "❌ Profile creation cancelled. Use /start to try again.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+        return
+    
+    # Save profile
+    temp = user_temp_data.get(user_id, {})
+    media_list = temp.get('media_list', [])
     
     # Upload media to private channel
     media_urls = []
-    for media in context.user_data.get('media_list', []):
-        url = await upload_media_to_channel(context.bot, media['file_id'], user_id)
+    for media in media_list:
+        url = upload_media_to_channel(bot, media['file_id'], user_id, media['type'])
         if url:
             media_urls.append(url)
     
-    # Save profile
+    # Save profile to database
     profile = {
         "user_id": user_id,
-        "username": update.effective_user.username,
-        "name": context.user_data['profile_name'],
-        "gender": context.user_data['temp_profile']['gender'],
-        "age": context.user_data['temp_profile']['age'],
-        "location_text": context.user_data['temp_profile']['location_text'],
-        "about": context.user_data['temp_profile'].get('about', ''),
+        "username": call.from_user.username,
+        "name": temp.get('name'),
+        "gender": temp.get('gender'),
+        "age": temp.get('age'),
+        "location_text": temp.get('location_text', ''),
+        "latitude": temp.get('latitude'),
+        "longitude": temp.get('longitude'),
+        "about": temp.get('about', ''),
         "media": media_urls,
-        "latitude": context.user_data['temp_profile'].get('latitude'),
-        "longitude": context.user_data['temp_profile'].get('longitude'),
         "created_at": datetime.utcnow(),
         "is_active": True
     }
     
     db.get_collection("profiles").insert_one(profile)
     
-    # Now ask for preference
-    keyboard = [[InlineKeyboardButton("👨 Male", callback_data="pref_male")],
-                [InlineKeyboardButton("👩 Female", callback_data="pref_female")],
-                [InlineKeyboardButton("👥 Both", callback_data="pref_both")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🎉 **Profile Created Successfully!** 🎉\n\n"
-        "Who do you want to see in your feed?",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    return PREFERENCE
-
-async def set_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set user's viewing preference"""
-    query = update.callback_query
-    await query.answer()
-    
-    preference = query.data.split('_')[1]
-    user_id = update.effective_user.id
-    
+    # Create user entry
+    user_data = {
+        "user_id": user_id,
+        "username": call.from_user.username,
+        "first_name": call.from_user.first_name,
+        "setup_complete": False,
+        "created_at": datetime.utcnow(),
+        "last_active": datetime.utcnow()
+    }
     db.get_collection("users").update_one(
         {"user_id": user_id},
-        {"$set": {"preference": preference, "setup_complete": True}},
+        {"$set": user_data},
         upsert=True
     )
     
-    # Clear temp data
-    context.user_data.clear()
+    user_states[user_id] = "awaiting_preference"
+    
+    # Ask for preference
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_male = types.InlineKeyboardButton("👨 Male", callback_data="pref_male")
+    btn_female = types.InlineKeyboardButton("👩 Female", callback_data="pref_female")
+    btn_both = types.InlineKeyboardButton("👥 Both", callback_data="pref_both")
+    markup.add(btn_male, btn_female, btn_both)
+    
+    bot.edit_message_text(
+        "🎉 **Profile Created Successfully!** 🎉\n\n"
+        "Who do you want to see in your feed?",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
+
+
+def handle_preference_callback(bot, call, user_states, user_temp_data):
+    """Handle preference selection callback"""
+    user_id = call.from_user.id
+    preference = call.data.split('_')[1]
+    
+    bot.answer_callback_query(call.id)
+    
+    # Update user with preference
+    db.get_collection("users").update_one(
+        {"user_id": user_id},
+        {"$set": {"preference": preference, "setup_complete": True}}
+    )
+    
+    # Clear temp data and state
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in user_temp_data:
+        del user_temp_data[user_id]
     
     # Show main menu
-    await show_main_menu(update, context)
-    return ConversationHandler.END
+    show_main_menu(bot, call.message.chat.id)
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def show_main_menu(bot, chat_id):
     """Show main menu after profile creation"""
-    query = update.callback_query if update.callback_query else None
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_profile = types.InlineKeyboardButton("👤 MY PROFILE", callback_data="my_profile")
+    btn_view = types.InlineKeyboardButton("👀 VIEW PROFILES", callback_data="view_profiles")
+    btn_notify = types.InlineKeyboardButton("🔔 NOTIFICATIONS", callback_data="notifications")
+    markup.add(btn_profile, btn_view, btn_notify)
     
-    keyboard = [[InlineKeyboardButton("👤 My Profile", callback_data="my_profile")],
-                [InlineKeyboardButton("👀 View Profiles", callback_data="view_profiles")],
-                [InlineKeyboardButton("🔔 Notifications", callback_data="notifications")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    bot.send_message(
+        chat_id,
+        "🏠 **Main Menu**\n\nChoose an option:",
+        reply_markup=markup
+    )
+
+
+def handle_edit_profile(bot, call, user_states, user_temp_data):
+    """Handle edit profile button (placeholder)"""
+    bot.answer_callback_query(call.id)
     
-    text = "🏠 **Main Menu**\n\nChoose an option:"
-    
-    if query:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    bot.edit_message_text(
+        "✏️ **Edit Profile**\n\n"
+        "Coming soon!",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id
+    )
