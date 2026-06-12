@@ -1,6 +1,71 @@
+# Render Blueprint Configuration for DEMON Dating Bot
+# https://render.com/docs/blueprint-spec
+
 services:
-  - type: web
-    name: telegram-dating-bot
+  - type: worker
+    name: demon-dating-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    repo: https://github.com/yourusername/demon-dating-bot
+    branch: main
+    
+    # Build Configuration
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    
+    # Start Command
+    startCommand: python app.py
+    
+    # Environment Variables
+    envVars:
+      - key: BOT_TOKEN
+        sync: false  # Manual entry required
+        description: "Telegram Bot Token from @BotFather"
+      
+      - key: MONGO_URI
+        sync: false
+        description: "MongoDB Atlas Connection String"
+      
+      - key: DB_NAME
+        value: demon_dating_bot
+        description: "Database name for the bot"
+      
+      - key: CHANNEL_USERNAME
+        value: "@nrtecno2"
+        description: "Telegram channel for force join verification"
+      
+      - key: PRIVATE_CHANNEL_ID
+        sync: false
+        description: "Private channel ID for media storage (starts with -100)"
+      
+      - key: PYTHON_VERSION
+        value: 3.11.0
+        description: "Python runtime version"
+      
+      - key: LOG_LEVEL
+        value: INFO
+        description: "Logging level (DEBUG, INFO, WARNING, ERROR)"
+    
+    # Resource Allocation
+    plan: free  # Options: free, starter, professional, business
+    numInstances: 1
+    
+    # Health Check
+    healthCheckPath: /health
+    healthCheckTimeout: 5
+    
+    # Auto-deploy settings
+    autoDeploy: true
+    
+    # Logging
+    logging:
+      - name: bot-logs
+        type: stdout
+        filter: ".*"
+
+# Optional: Cron job for keeping worker alive (free tier needs this)
+cronjobs:
+  - name: keep-alive
+    schedule: "*/14 * * * *"  # Every 14 minutes (Render free tier sleeps after 15 minutes idle)
+    command: "curl https://demon-dating-bot.onrender.com/health || true"
+    plan: free
