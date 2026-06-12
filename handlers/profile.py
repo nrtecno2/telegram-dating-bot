@@ -370,4 +370,4 @@ def handle_edit_profile(bot, call, user_states, user_temp_data):
         "Coming soon!",
         chat_id=call.message.chat.id,
         message_id=call.message.message_id
-    )
+        )
