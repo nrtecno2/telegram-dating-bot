@@ -6,8 +6,6 @@ Library: pyTelegramBotAPI
 
 import os
 import logging
-import threading
-import time
 from datetime import datetime
 import telebot
 from telebot import types
@@ -19,16 +17,15 @@ load_dotenv()
 from database import get_db
 
 # Import handlers
-from handlers.start import handle_start, handle_verify_callback, handle_continue_bot
+from handlers.start import handle_start, handle_verify_callback, handle_continue_bot, handle_create_profile
 from handlers.profile import (
-    handle_create_profile, handle_name, handle_gender_callback,
-    handle_age, handle_location, handle_location_text, handle_about,
-    handle_media, handle_confirm_callback, handle_preference_callback,
-    show_main_menu
+    handle_name, handle_gender_callback, handle_age, handle_location,
+    handle_location_text, handle_about, handle_media, handle_confirm_callback,
+    handle_preference_callback, show_main_menu, handle_my_profile, handle_edit_profile
 )
 from handlers.view_profiles import (
     handle_view_profiles, handle_like_callback, handle_skip_callback,
-    handle_stop_callback, show_my_profile
+    handle_stop_callback
 )
 from handlers.notifications import handle_notifications
 from handlers.chat import handle_chat_callback, handle_chat_message, handle_cancel_chat
@@ -43,12 +40,12 @@ logger = logging.getLogger(__name__)
 # Bot configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN not found!")
+    raise ValueError("❌ BOT_TOKEN not found in environment variables!")
 
 # Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
 
-# Store user states (in production, use Redis or database)
+# Store user states (in production, use Redis)
 user_states = {}
 user_temp_data = {}
 
@@ -69,6 +66,19 @@ def cancel_command(message):
     if user_id in user_temp_data:
         del user_temp_data[user_id]
     bot.reply_to(message, "❌ Operation cancelled. Use /start to begin again.")
+
+
+@bot.message_handler(commands=['done'])
+def done_command(message):
+    """Handle /done command for media completion"""
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    
+    if state == "awaiting_media":
+        from handlers.profile import confirm_profile
+        confirm_profile(bot, message, user_states, user_temp_data)
+    else:
+        bot.reply_to(message, "❌ Nothing to complete.")
 
 
 # ========== CALLBACK QUERY HANDLERS ==========
@@ -94,11 +104,11 @@ def handle_callback(call):
     elif data.startswith("gender_"):
         handle_gender_callback(bot, call, user_states, user_temp_data)
     
-    # Confirm callbacks
+    # Confirm callbacks (confirm_yes, confirm_no)
     elif data.startswith("confirm_"):
         handle_confirm_callback(bot, call, user_states, user_temp_data)
     
-    # Preference callbacks
+    # Preference callbacks (pref_male, pref_female, pref_both)
     elif data.startswith("pref_"):
         handle_preference_callback(bot, call, user_states, user_temp_data)
     
@@ -116,7 +126,10 @@ def handle_callback(call):
         handle_stop_callback(bot, call, user_states, user_temp_data)
     
     elif data == "my_profile":
-        show_my_profile(bot, call)
+        handle_my_profile(bot, call)
+    
+    elif data == "edit_profile":
+        handle_edit_profile(bot, call, user_states, user_temp_data)
     
     elif data == "notifications":
         handle_notifications(bot, call)
@@ -128,16 +141,16 @@ def handle_callback(call):
         handle_cancel_chat(bot, call, user_states, user_temp_data)
     
     elif data == "main_menu":
-        show_main_menu(bot, call.message.chat.id, None)
+        show_main_menu(bot, call.message.chat.id)
     
     else:
-        bot.answer_callback_query(call.id, "Processing...")
+        bot.answer_callback_query(call.id, "Processing...", show_alert=False)
 
 
 # ========== MESSAGE HANDLERS ==========
 @bot.message_handler(func=lambda message: True, content_types=['text', 'photo', 'video', 'location'])
 def handle_messages(message):
-    """Handle all text and media messages"""
+    """Handle all text, media, and location messages"""
     user_id = message.from_user.id
     state = user_states.get(user_id)
     
@@ -145,10 +158,7 @@ def handle_messages(message):
     
     # Handle location
     if message.location:
-        if state == "awaiting_location_coords":
-            handle_location(bot, message, user_states, user_temp_data)
-        else:
-            handle_location(bot, message, user_states, user_temp_data)
+        handle_location(bot, message, user_states, user_temp_data)
         return
     
     # Handle media (photos/videos)
@@ -181,20 +191,26 @@ def handle_messages(message):
         elif state == "awaiting_chat_message":
             handle_chat_message(bot, message, user_states, user_temp_data)
         
-        elif text == "/done" and state == "awaiting_media":
-            from handlers.profile import confirm_profile
-            confirm_profile(bot, message, user_states, user_temp_data)
-        
         else:
             bot.reply_to(message, "❌ Invalid command. Use /start to begin.")
     
     # Update last activity
-    db = get_db()
-    db.get_collection("users").update_one(
-        {"user_id": user_id},
-        {"$set": {"last_active": datetime.utcnow()}},
-        upsert=True
-    )
+    try:
+        db = get_db()
+        db.get_collection("users").update_one(
+            {"user_id": user_id},
+            {"$set": {"last_active": datetime.utcnow()}},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"Failed to update last_active: {e}")
+
+
+# ========== ERROR HANDLER ==========
+@bot.message_handler(func=lambda message: True)
+def fallback_handler(message):
+    """Fallback handler for any unhandled messages"""
+    bot.reply_to(message, "❌ I didn't understand that. Use /start to begin.")
 
 
 # ========== MAIN FUNCTION ==========
@@ -202,9 +218,14 @@ def main():
     """Main function to run the bot"""
     logger.info("🚀 DEMON DATING BOT - Starting up...")
     logger.info(f"📅 Startup time: {datetime.utcnow()}")
-    logger.info(f"🤖 Bot username: @{bot.get_me().username}")
     
-    # Clear pending updates
+    try:
+        bot_info = bot.get_me()
+        logger.info(f"🤖 Bot username: @{bot_info.username}")
+    except Exception as e:
+        logger.error(f"Failed to get bot info: {e}")
+    
+    # Clear webhook (using polling)
     bot.delete_webhook()
     
     # Start polling
