@@ -44,7 +44,7 @@ def handle_start(bot, message, user_states, user_temp_data):
         start_profile_creation(bot, message, user_states, user_temp_data)
 
 
-def handle_join_channel(bot, message):
+def handle_channel_join(bot, message):
     """Handle JOIN CHANNEL button"""
     markup = types.InlineKeyboardMarkup()
     btn = types.InlineKeyboardButton("📢 Join @nrtecno2", url="https://t.me/nrtecno2")
