@@ -429,24 +429,47 @@ def fallback_handler(message):
 def main():
     """Main function to run the bot"""
     # Start Flask in background thread for health check (Render Web Service requirement)
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    time.sleep(2)
     
     logger.info("🚀 DEMON DATING BOT - Starting up...")
     logger.info(f"📅 Startup time: {datetime.utcnow()}")
     
-    try:
-        bot_info = bot.get_me()
-        logger.info(f"🤖 Bot username: @{bot_info.username}")
-    except Exception as e:
-        logger.error(f"Failed to get bot info: {e}")
+    # Retry bot connection with error handling
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            bot_info = bot.get_me()
+            logger.info(f"🤖 Bot username: @{bot_info.username}")
+            break
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1}/{max_retries} - Failed to get bot info: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                logger.error("Could not connect to Telegram API after multiple attempts")
+                return
     
     # Clear webhook and start polling
-    bot.delete_webhook()
-    time.sleep(1)
+    try:
+        bot.delete_webhook()
+        time.sleep(1)
+        bot.remove_webhook()
+        time.sleep(1)
+    except Exception as e:
+        logger.warning(f"Webhook cleanup warning: {e}")
     
     logger.info("🔥 DEMON CORE ONLINE - Bot is polling...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    
+    # Start polling with error recovery
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            logger.info("Restarting polling in 10 seconds...")
+            time.sleep(10)
 
 
 if __name__ == "__main__":
