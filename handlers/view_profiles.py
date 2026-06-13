@@ -3,7 +3,7 @@ import random
 from datetime import datetime
 from telebot import types
 from database import get_db
-from utils.location import get_nearby_profiles
+from utils.location import get_nearby_profiles, calculate_distance
 
 logger = logging.getLogger(__name__)
 db = get_db()
@@ -12,33 +12,29 @@ db = get_db()
 active_sessions = {}
 
 
-def handle_view_profiles(bot, call, user_states, user_temp_data):
+def handle_view_profiles(bot, message, user_states, user_temp_data):
     """Start viewing profiles based on user preference"""
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id)
+    user_id = message.from_user.id
     
     # Check if user has profile
     my_profile = db.get_collection("profiles").find_one({"user_id": user_id})
     if not my_profile:
-        bot.edit_message_text(
-            "❌ You need to create a profile first!\nUse /start to begin.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
+        bot.reply_to(message, "❌ You need to create a profile first!\nUse /start to begin.")
         return
     
     # Get user preference
     user = db.get_collection("users").find_one({"user_id": user_id})
     if not user or not user.get('preference'):
-        markup = types.InlineKeyboardMarkup()
-        btn_pref = types.InlineKeyboardButton("⚙️ Set Preference", callback_data="set_preference")
-        markup.add(btn_pref)
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        btn_male = types.KeyboardButton("👨 Male")
+        btn_female = types.KeyboardButton("👩 Female")
+        btn_both = types.KeyboardButton("👥 Both")
+        markup.add(btn_male, btn_female, btn_both)
         
-        bot.edit_message_text(
-            "⚠️ Please set your preference first!\n\nChoose who you want to see:",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
+        bot.reply_to(
+            message,
+            "⚠️ Please set your preference first!\n\n"
+            "Who do you want to see?",
             reply_markup=markup
         )
         return
@@ -56,9 +52,8 @@ def handle_view_profiles(bot, call, user_states, user_temp_data):
     elif preference == 'female':
         query_filter["gender"] = "female"
     
-    # Get already liked users
+    # Get already liked users to exclude them
     liked_users = db.get_collection("likes").distinct("to_user", {"from_user": user_id})
-    query_filter["user_id"] = {"$nin": liked_users + [user_id]}
     
     # Get profiles
     profiles = []
@@ -71,35 +66,56 @@ def handle_view_profiles(bot, call, user_states, user_temp_data):
             max_distance_km=50
         )
         profiles = list(nearby)
+        # Filter out liked users
+        profiles = [p for p in profiles if p['user_id'] not in liked_users]
     else:
-        profiles = list(db.get_collection("profiles").find(query_filter).limit(100))
+        profiles = list(db.get_collection("profiles").find(query_filter))
+        # Filter out liked users
+        profiles = [p for p in profiles if p['user_id'] not in liked_users]
         random.shuffle(profiles)
     
+    # If no profiles found, reset and show all except liked ones
     if not profiles:
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        btn_refresh = types.InlineKeyboardButton("🔄 Refresh", callback_data="view_profiles")
-        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
-        markup.add(btn_refresh, btn_menu)
+        # Get all profiles again without liked filter (but still exclude self and liked)
+        if my_profile.get('latitude') and my_profile.get('longitude'):
+            nearby = get_nearby_profiles(
+                my_profile['latitude'],
+                my_profile['longitude'],
+                query_filter,
+                max_distance_km=50
+            )
+            profiles = list(nearby)
+        else:
+            profiles = list(db.get_collection("profiles").find(query_filter))
         
-        bot.edit_message_text(
-            "😔 **No profiles found!**\n\n"
-            "Possible reasons:\n"
-            "├ ─ No users matching your preference\n"
-            "├ ─ You've liked everyone available\n"
-            "└ ─ Try changing your preference\n\n"
-            "🔄 Click Refresh to check again.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup
-        )
-        return
+        # Still exclude liked users
+        profiles = [p for p in profiles if p['user_id'] not in liked_users]
+        
+        if not profiles:
+            # Really no profiles at all
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            btn_refresh = types.KeyboardButton("🔄 Refresh")
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_refresh, btn_menu)
+            
+            bot.reply_to(
+                message,
+                "😔 **No profiles found!**\n\n"
+                "Possible reasons:\n"
+                "├ ─ No users matching your preference\n"
+                "├ ─ You've liked everyone available\n"
+                "└ ─ Try changing your preference\n\n"
+                "🔄 Click Refresh to check again.",
+                reply_markup=markup
+            )
+            return
     
     # Store session
     active_sessions[user_id] = {
         'profiles': profiles,
         'current_index': 0,
-        'message_id': call.message.message_id,
-        'chat_id': call.message.chat.id
+        'chat_id': message.chat.id,
+        'preference': preference
     }
     
     # Show first profile
@@ -107,7 +123,7 @@ def handle_view_profiles(bot, call, user_states, user_temp_data):
 
 
 def show_profile(bot, user_id):
-    """Display current profile to user"""
+    """Display current profile to user with media"""
     session = active_sessions.get(user_id)
     if not session:
         return
@@ -116,24 +132,21 @@ def show_profile(bot, user_id):
     index = session['current_index']
     
     if index >= len(profiles):
-        # No more profiles
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        btn_restart = types.InlineKeyboardButton("🔄 Start Over", callback_data="view_profiles")
-        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
-        markup.add(btn_restart, btn_menu)
+        # No more profiles - loop back to start
+        session['current_index'] = 0
+        index = 0
         
-        bot.edit_message_text(
-            "🏁 **You've viewed all profiles!**\n\n"
-            "No more profiles available right now.\n"
-            "Come back later for new matches!",
-            chat_id=session['chat_id'],
-            message_id=session['message_id'],
-            reply_markup=markup
-        )
-        
-        # Clean up session
-        del active_sessions[user_id]
-        return
+        if len(profiles) == 0:
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_menu)
+            bot.send_message(
+                session['chat_id'],
+                "🏁 **No profiles available!**\n\nPlease check back later.",
+                reply_markup=markup
+            )
+            del active_sessions[user_id]
+            return
     
     profile = profiles[index]
     
@@ -150,47 +163,86 @@ def show_profile(bot, user_id):
     
     text += f"\n👥 Profile {index + 1} of {len(profiles)}"
     
-    # Build action buttons
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_like = types.InlineKeyboardButton("❤️ LIKE", callback_data=f"like_{profile['user_id']}")
-    btn_chat = types.InlineKeyboardButton("💬 CHAT", callback_data=f"chat_{profile['user_id']}")
-    btn_skip = types.InlineKeyboardButton("⏭️ SKIP", callback_data="skip_profile")
-    btn_stop = types.InlineKeyboardButton("🛑 STOP", callback_data="stop_viewing")
+    # Build action buttons - ReplyKeyboardMarkup (bottom buttons)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    btn_like = types.KeyboardButton("❤️ LIKE")
+    btn_chat = types.KeyboardButton("💬 CHAT")
+    btn_skip = types.KeyboardButton("⏭️ SKIP")
+    btn_stop = types.KeyboardButton("🛑 STOP VIEWING")
     markup.add(btn_like, btn_chat, btn_skip, btn_stop)
     
-    # Send or edit message with media
-    if profile.get('media') and len(profile['media']) > 0:
-        # For now, send text only (media handling can be added later)
-        bot.edit_message_text(
-            text,
-            chat_id=session['chat_id'],
-            message_id=session['message_id'],
-            reply_markup=markup
-        )
-    else:
-        bot.edit_message_text(
-            text,
-            chat_id=session['chat_id'],
-            message_id=session['message_id'],
-            reply_markup=markup
-        )
-
-
-def handle_like_callback(bot, call, user_states, user_temp_data):
-    """Like the current profile"""
-    user_id = call.from_user.id
-    target_id = int(call.data.split('_')[1])
+    # Store current profile user_id in session for actions
+    session['current_profile_id'] = profile['user_id']
     
-    bot.answer_callback_query(call.id, "❤️ Liked! Moving to next...")
+    # Send media if available
+    media_list = profile.get('media', [])
+    if media_list and len(media_list) > 0:
+        # Try to send first media as photo/video with caption
+        first_media = media_list[0]
+        
+        # Check if it's a photo or video based on URL or type
+        if first_media.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')) or 'photo' in first_media.lower():
+            try:
+                bot.send_photo(
+                    session['chat_id'],
+                    photo=first_media,
+                    caption=text,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send photo: {e}")
+                bot.send_message(session['chat_id'], text, parse_mode='Markdown')
+        else:
+            try:
+                bot.send_video(
+                    session['chat_id'],
+                    video=first_media,
+                    caption=text,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send video: {e}")
+                bot.send_message(session['chat_id'], text, parse_mode='Markdown')
+        
+        # Send remaining media as separate messages (without caption)
+        for media_url in media_list[1:3]:  # Max 3 media
+            try:
+                if media_url.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')):
+                    bot.send_photo(session['chat_id'], photo=media_url)
+                else:
+                    bot.send_video(session['chat_id'], video=media_url)
+            except Exception as e:
+                logger.error(f"Failed to send additional media: {e}")
+    else:
+        # No media, just text
+        bot.send_message(session['chat_id'], text, parse_mode='Markdown')
+    
+    # Send action buttons
+    bot.send_message(
+        session['chat_id'],
+        "What would you like to do?",
+        reply_markup=markup
+    )
+
+
+def handle_like_action(bot, message, user_states, user_temp_data):
+    """Handle like action from bottom button"""
+    user_id = message.from_user.id
+    session = active_sessions.get(user_id)
+    
+    if not session:
+        bot.reply_to(message, "❌ No active session. Use VIEW PROFILES to start.")
+        return
+    
+    target_id = session.get('current_profile_id')
+    if not target_id:
+        bot.reply_to(message, "❌ Error: No profile selected.")
+        return
     
     # Get target profile
     target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
     if not target_profile:
-        bot.edit_message_text(
-            "❌ Profile not found!",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
+        bot.reply_to(message, "❌ Profile not found!")
         return
     
     # Check if already liked
@@ -204,7 +256,7 @@ def handle_like_callback(bot, call, user_states, user_temp_data):
         like_data = {
             "from_user": user_id,
             "to_user": target_id,
-            "from_name": call.from_user.first_name,
+            "from_name": message.from_user.first_name,
             "to_name": target_profile.get('name'),
             "is_mutual": False,
             "is_read": False,
@@ -216,9 +268,9 @@ def handle_like_callback(bot, call, user_states, user_temp_data):
         notification = {
             "user_id": target_id,
             "type": "like",
-            "from_user": user_id,
-            "from_name": call.from_user.first_name,
-            "message": f"❤️ {call.from_user.first_name} liked your profile!",
+            "from_user_id": user_id,
+            "from_name": message.from_user.first_name,
+            "message": f"❤️ {message.from_user.first_name} liked your profile!",
             "is_read": False,
             "created_at": datetime.utcnow()
         }
@@ -241,11 +293,11 @@ def handle_like_callback(bot, call, user_states, user_temp_data):
             )
             
             # Send mutual match notification to both
-            for uid, name in [(target_id, call.from_user.first_name), (user_id, target_profile.get('name'))]:
+            for uid, name in [(target_id, message.from_user.first_name), (user_id, target_profile.get('name'))]:
                 match_notification = {
                     "user_id": uid,
                     "type": "mutual_match",
-                    "from_user": user_id if uid == target_id else target_id,
+                    "from_user_id": user_id if uid == target_id else target_id,
                     "from_name": name,
                     "message": f"🎉 It's a match! You and {name} liked each other!",
                     "is_read": False,
@@ -253,70 +305,96 @@ def handle_like_callback(bot, call, user_states, user_temp_data):
                 }
                 db.get_collection("notifications").insert_one(match_notification)
             
-            bot.answer_callback_query(call.id, "🎉 It's a match! 🎉", show_alert=True)
+            bot.reply_to(message, "🎉 **It's a match!** 🎉\n\nYou can now chat with this user!")
+        else:
+            bot.reply_to(message, "❤️ Liked! Moving to next profile...")
+    else:
+        bot.reply_to(message, "❤️ You already liked this profile!")
     
     # Move to next profile
+    session['current_index'] += 1
+    show_profile(bot, user_id)
+
+
+def handle_skip_action(bot, message, user_states, user_temp_data):
+    """Handle skip action from bottom button"""
+    user_id = message.from_user.id
     session = active_sessions.get(user_id)
-    if session:
-        session['current_index'] += 1
-        show_profile(bot, user_id)
-    else:
-        # Create new view profiles callback
-        handle_view_profiles(bot, call, user_states, user_temp_data)
-
-
-def handle_skip_callback(bot, call, user_states, user_temp_data):
-    """Skip current profile"""
-    user_id = call.from_user.id
     
-    bot.answer_callback_query(call.id, "⏭️ Skipped")
+    if not session:
+        bot.reply_to(message, "❌ No active session. Use VIEW PROFILES to start.")
+        return
     
-    session = active_sessions.get(user_id)
-    if session:
-        session['current_index'] += 1
-        show_profile(bot, user_id)
-    else:
-        handle_view_profiles(bot, call, user_states, user_temp_data)
+    bot.reply_to(message, "⏭️ Skipped!")
+    
+    # Move to next profile
+    session['current_index'] += 1
+    show_profile(bot, user_id)
 
 
-def handle_stop_callback(bot, call, user_states, user_temp_data):
-    """Stop viewing profiles"""
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id)
+def handle_stop_viewing_action(bot, message, user_states, user_temp_data):
+    """Handle stop viewing action from bottom button"""
+    user_id = message.from_user.id
     
     # Clean up session
     if user_id in active_sessions:
         del active_sessions[user_id]
     
     # Return to main menu
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_profile = types.InlineKeyboardButton("👤 MY PROFILE", callback_data="my_profile")
-    btn_view = types.InlineKeyboardButton("👀 VIEW PROFILES", callback_data="view_profiles")
-    btn_notify = types.InlineKeyboardButton("🔔 NOTIFICATIONS", callback_data="notifications")
-    markup.add(btn_profile, btn_view, btn_notify)
+    from handlers.profile import show_main_menu
+    show_main_menu(bot, message.chat.id)
+
+
+def handle_chat_from_profile(bot, message, user_states, user_temp_data):
+    """Handle chat action from profile viewing"""
+    user_id = message.from_user.id
+    session = active_sessions.get(user_id)
     
-    bot.edit_message_text(
-        "🏠 **Main Menu**\n\nViewing stopped. Choose an option:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
-    )
+    if not session:
+        bot.reply_to(message, "❌ No active session. Use VIEW PROFILES to start.")
+        return
+    
+    target_id = session.get('current_profile_id')
+    if not target_id:
+        bot.reply_to(message, "❌ Error: No profile selected.")
+        return
+    
+    # Check if mutual match exists
+    is_mutual = db.get_collection("likes").find_one({
+        "$and": [
+            {"from_user": user_id, "to_user": target_id, "is_mutual": True},
+            {"from_user": target_id, "to_user": user_id, "is_mutual": True}
+        ]
+    })
+    
+    if not is_mutual:
+        # Check if they have liked each other
+        like1 = db.get_collection("likes").find_one({"from_user": user_id, "to_user": target_id})
+        like2 = db.get_collection("likes").find_one({"from_user": target_id, "to_user": user_id})
+        
+        if like1 and like2:
+            is_mutual = True
+        else:
+            bot.reply_to(
+                message,
+                "💬 **Cannot Chat**\n\n"
+                "You can only chat with mutual matches.\n\n"
+                "💡 Tip: Like each other first to start chatting!"
+            )
+            return
+    
+    # Redirect to chat
+    from handlers.chat import start_chat_session
+    start_chat_session(bot, message, user_id, target_id)
 
 
-def handle_my_profile(bot, call):
+def handle_my_profile(bot, message):
     """Show user's own profile"""
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id)
+    user_id = message.from_user.id
     
     profile = db.get_collection("profiles").find_one({"user_id": user_id})
     if not profile:
-        bot.edit_message_text(
-            "❌ No profile found. Use /start to create one.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
+        bot.reply_to(message, "❌ No profile found. Use /start to create one.")
         return
     
     # Get stats
@@ -335,15 +413,41 @@ def handle_my_profile(bot, call):
     
     text += f"📷 Media: {len(profile.get('media', []))} file(s)"
     
-    # Action buttons
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    btn_edit = types.InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")
-    btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+    # Action buttons - bottom
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_edit = types.KeyboardButton("✏️ EDIT PROFILE")
+    btn_menu = types.KeyboardButton("🏠 Main Menu")
     markup.add(btn_edit, btn_menu)
     
-    bot.edit_message_text(
-        text,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
+    # Send media if available
+    media_list = profile.get('media', [])
+    if media_list and len(media_list) > 0:
+        try:
+            bot.send_photo(
+                message.chat.id,
+                photo=media_list[0],
+                caption=text,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send profile photo: {e}")
+            bot.reply_to(message, text, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, text, parse_mode='Markdown')
+    
+    bot.send_message(
+        message.chat.id,
+        "Choose an option:",
         reply_markup=markup
     )
+
+
+def handle_refresh_profiles(bot, message, user_states, user_temp_data):
+    """Handle refresh button when no profiles found"""
+    user_id = message.from_user.id
+    
+    # Clear session and restart
+    if user_id in active_sessions:
+        del active_sessions[user_id]
+    
+    handle_view_profiles(bot, message, user_states, user_temp_data)
