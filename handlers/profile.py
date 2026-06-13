@@ -919,7 +919,6 @@ def handle_confirm_delete(bot, message):
 
 ---
 
-✅ File 1/4 complete: handlers/profile.py
 
 📋 Is file mein kya add/change hua:
 
