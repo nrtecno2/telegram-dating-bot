@@ -39,7 +39,7 @@ from handlers.profile import (
     handle_stats, handle_settings, handle_delete_account, handle_confirm_delete
 )
 from handlers.view_profiles import (
-    handle_view_profiles, handle_like, handle_skip, handle_stop
+    handle_view_profiles, handle_like_action, handle_skip_action, handle_stop_viewing_action
 )
 from handlers.notifications import handle_notifications
 from handlers.chat import handle_chat_message, handle_cancel_chat
