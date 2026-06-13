@@ -7,11 +7,9 @@ logger = logging.getLogger(__name__)
 db = get_db()
 
 
-def handle_notifications(bot, call):
-    """Show all unread notifications for user"""
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id)
+def handle_notifications(bot, message):
+    """Show all notifications for user"""
+    user_id = message.from_user.id
     
     # Get unread notifications
     notifications = list(db.get_collection("notifications").find({
@@ -20,17 +18,26 @@ def handle_notifications(bot, call):
     }).sort("created_at", -1))
     
     if not notifications:
-        markup = types.InlineKeyboardMarkup()
-        btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
-        markup.add(btn_menu)
+        # Check if there are any read notifications to show
+        all_notifications = list(db.get_collection("notifications").find({
+            "user_id": user_id
+        }).sort("created_at", -1).limit(20))
         
-        bot.edit_message_text(
-            "🔔 **No new notifications**\n\nYou're all caught up!",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup
-        )
-        return
+        if not all_notifications:
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_menu)
+            
+            bot.reply_to(
+                message,
+                "🔔 **No notifications**\n\nYou don't have any notifications yet.\n\n"
+                "💡 Tip: Like more profiles to get matches!",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+            return
+        else:
+            notifications = all_notifications
     
     # Mark all as read
     db.get_collection("notifications").update_many(
@@ -38,190 +45,275 @@ def handle_notifications(bot, call):
         {"$set": {"is_read": True}}
     )
     
-    # Build notification message
-    message = f"🔔 **{len(notifications)} New Notification(s)**\n\n"
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    
+    # Send each notification individually with action buttons
     for notif in notifications:
         notif_type = notif.get('type')
         from_name = notif.get('from_name', 'Someone')
         from_user_id = notif.get('from_user_id')
         
         if notif_type == 'like':
-            message += f"❤️ **{from_name} liked your profile!**\n"
-            if from_user_id:
-                btn = types.InlineKeyboardButton(
-                    f"👤 View {from_name}",
-                    callback_data=f"view_user_{from_user_id}"
-                )
-                markup.add(btn)
+            text = f"❤️ **{from_name} liked your profile!**"
+            
+            # Bottom buttons for like notification
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            btn_view = types.KeyboardButton(f"👤 View {from_name}")
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_view, btn_menu)
+            
+            # Store context for this user
+            # We'll use user_temp_data to store which profile to view
+            from handlers.start import user_temp_data
+            user_temp_data[user_id] = {'view_user_id': from_user_id, 'view_user_name': from_name}
+            
+            bot.send_message(
+                message.chat.id,
+                text,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
         
         elif notif_type == 'mutual_match':
-            message += f"🎉 **Mutual Match!** {from_name} liked you back!\n"
-            if from_user_id:
-                btn = types.InlineKeyboardButton(
-                    f"💬 Chat with {from_name}",
-                    callback_data=f"chat_{from_user_id}"
-                )
-                markup.add(btn)
+            text = f"🎉 **Mutual Match!** {from_name} liked you back!"
+            
+            # Bottom buttons for mutual match notification
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            btn_view = types.KeyboardButton(f"👤 View {from_name}")
+            btn_chat = types.KeyboardButton(f"💬 Chat with {from_name}")
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_view, btn_chat, btn_menu)
+            
+            from handlers.start import user_temp_data
+            user_temp_data[user_id] = {'view_user_id': from_user_id, 'view_user_name': from_name, 'is_mutual': True}
+            
+            bot.send_message(
+                message.chat.id,
+                text,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
         
         elif notif_type == 'message':
-            msg_preview = notif.get('message', '')[:50]
-            message += f"💬 **{from_name} texted you:**\n"
-            message += f"_{msg_preview}_\n"
-            if from_user_id:
-                btn = types.InlineKeyboardButton(
-                    f"💬 Reply to {from_name}",
-                    callback_data=f"chat_{from_user_id}"
-                )
-                markup.add(btn)
+            msg_preview = notif.get('message', '')[:100]
+            text = f"💬 **{from_name} sent you a message:**\n\n_{msg_preview}_"
+            
+            # Bottom buttons for message notification
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            btn_reply = types.KeyboardButton(f"💬 Reply to {from_name}")
+            btn_view = types.KeyboardButton(f"👤 View {from_name}")
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_reply, btn_view, btn_menu)
+            
+            from handlers.start import user_temp_data
+            user_temp_data[user_id] = {'chat_user_id': from_user_id, 'chat_user_name': from_name}
+            
+            bot.send_message(
+                message.chat.id,
+                text,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
         
         elif notif_type == 'system':
-            message += f"📢 **System:** {notif.get('message', '')}\n"
+            text = f"📢 **System:** {notif.get('message', '')}"
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+            btn_menu = types.KeyboardButton("🏠 Main Menu")
+            markup.add(btn_menu)
+            
+            bot.send_message(
+                message.chat.id,
+                text,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+    
+    # If no specific notifications were shown, show main menu option
+    if not notifications:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+        btn_menu = types.KeyboardButton("🏠 Main Menu")
+        markup.add(btn_menu)
         
-        message += "\n---\n"
+        bot.send_message(
+            message.chat.id,
+            "🔔 **All caught up!**\n\nYou have no new notifications.",
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+
+
+def handle_view_user_from_notification(bot, message, user_temp_data):
+    """Handle view user button from notification"""
+    user_id = message.from_user.id
+    data = user_temp_data.get(user_id, {})
+    target_id = data.get('view_user_id')
+    target_name = data.get('view_user_name', 'User')
     
-    btn_menu = types.InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
-    markup.add(btn_menu)
+    if not target_id:
+        bot.reply_to(message, "❌ User not found!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
     
-    bot.edit_message_text(
-        message,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
+    # Get target profile
+    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+    if not target_profile:
+        bot.reply_to(message, "❌ User profile not found!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
+    
+    # Display profile
+    text = f"👤 **{target_profile['name']}**\n"
+    text += f"🎂 Age: {target_profile['age']}\n"
+    text += f"📍 {target_profile.get('location_text', 'Location not specified')}\n"
+    
+    if target_profile.get('about'):
+        text += f"\n📝 **About:**\n{target_profile['about'][:200]}\n"
+    
+    # Bottom buttons
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_like = types.KeyboardButton(f"❤️ Like {target_profile['name']}")
+    btn_chat = types.KeyboardButton(f"💬 Chat with {target_profile['name']}")
+    btn_menu = types.KeyboardButton("🏠 Main Menu")
+    markup.add(btn_like, btn_chat, btn_menu)
+    
+    # Store for actions
+    user_temp_data[user_id] = {'view_user_id': target_id, 'view_user_name': target_profile['name']}
+    
+    # Send media if available
+    media_list = target_profile.get('media', [])
+    if media_list and len(media_list) > 0:
+        try:
+            bot.send_photo(
+                message.chat.id,
+                photo=media_list[0],
+                caption=text,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}")
+            bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    else:
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    
+    bot.send_message(
+        message.chat.id,
+        "What would you like to do?",
         reply_markup=markup
     )
 
 
-def send_like_notification(bot, to_user_id, from_user_id, from_name):
-    """Send like notification to user"""
-    notification = {
-        "user_id": to_user_id,
-        "type": "like",
-        "from_user_id": from_user_id,
-        "from_name": from_name,
-        "message": f"❤️ {from_name} liked your profile!",
-        "is_read": False,
-        "created_at": datetime.utcnow()
-    }
-    db.get_collection("notifications").insert_one(notification)
+def handle_like_from_notification(bot, message, user_temp_data):
+    """Handle like button from notification view"""
+    user_id = message.from_user.id
+    data = user_temp_data.get(user_id, {})
+    target_id = data.get('view_user_id')
+    target_name = data.get('view_user_name')
     
-    # Also create like record
-    like_data = {
-        "from_user": from_user_id,
-        "to_user": to_user_id,
-        "from_name": from_name,
-        "to_name": None,
-        "is_mutual": False,
-        "is_read": False,
-        "created_at": datetime.utcnow()
-    }
-    db.get_collection("likes").insert_one(like_data)
+    if not target_id:
+        bot.reply_to(message, "❌ User not found!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
     
-    # Check for mutual like
-    check_mutual_like(bot, from_user_id, to_user_id)
-
-
-def send_message_notification(bot, to_user_id, from_user_id, from_name, message_preview):
-    """Send message notification to user"""
-    notification = {
-        "user_id": to_user_id,
-        "type": "message",
-        "from_user_id": from_user_id,
-        "from_name": from_name,
-        "message": message_preview[:100],
-        "is_read": False,
-        "created_at": datetime.utcnow()
-    }
-    db.get_collection("notifications").insert_one(notification)
-
-
-def send_mutual_match_notification(bot, user1_id, user2_id, user1_name, user2_name):
-    """Send mutual match notification to both users"""
-    # Notification for user1
-    notif1 = {
-        "user_id": user1_id,
-        "type": "mutual_match",
-        "from_user_id": user2_id,
-        "from_name": user2_name,
-        "message": f"🎉 It's a match! You and {user2_name} liked each other!",
-        "is_read": False,
-        "created_at": datetime.utcnow()
-    }
-    db.get_collection("notifications").insert_one(notif1)
-    
-    # Notification for user2
-    notif2 = {
-        "user_id": user2_id,
-        "type": "mutual_match",
-        "from_user_id": user1_id,
-        "from_name": user1_name,
-        "message": f"🎉 It's a match! You and {user1_name} liked each other!",
-        "is_read": False,
-        "created_at": datetime.utcnow()
-    }
-    db.get_collection("notifications").insert_one(notif2)
-
-
-def check_mutual_like(bot, user1_id, user2_id):
-    """Check if two users have liked each other"""
-    like1 = db.get_collection("likes").find_one({
-        "from_user": user1_id,
-        "to_user": user2_id
+    # Check if already liked
+    existing_like = db.get_collection("likes").find_one({
+        "from_user": user_id,
+        "to_user": target_id
     })
     
-    like2 = db.get_collection("likes").find_one({
-        "from_user": user2_id,
-        "to_user": user1_id
-    })
+    if existing_like:
+        bot.reply_to(message, f"❤️ You already liked {target_name}!")
+    else:
+        # Create like
+        like_data = {
+            "from_user": user_id,
+            "to_user": target_id,
+            "from_name": message.from_user.first_name,
+            "to_name": target_name,
+            "is_mutual": False,
+            "is_read": False,
+            "created_at": datetime.utcnow()
+        }
+        db.get_collection("likes").insert_one(like_data)
+        
+        # Create notification
+        notification = {
+            "user_id": target_id,
+            "type": "like",
+            "from_user_id": user_id,
+            "from_name": message.from_user.first_name,
+            "message": f"❤️ {message.from_user.first_name} liked your profile!",
+            "is_read": False,
+            "created_at": datetime.utcnow()
+        }
+        db.get_collection("notifications").insert_one(notification)
+        
+        # Check for mutual
+        mutual = db.get_collection("likes").find_one({
+            "from_user": target_id,
+            "to_user": user_id
+        })
+        
+        if mutual:
+            db.get_collection("likes").update_many(
+                {"$or": [
+                    {"from_user": user_id, "to_user": target_id},
+                    {"from_user": target_id, "to_user": user_id}
+                ]},
+                {"$set": {"is_mutual": True}}
+            )
+            
+            match_notification = {
+                "user_id": target_id,
+                "type": "mutual_match",
+                "from_user_id": user_id,
+                "from_name": message.from_user.first_name,
+                "message": f"🎉 It's a match! You and {message.from_user.first_name} liked each other!",
+                "is_read": False,
+                "created_at": datetime.utcnow()
+            }
+            db.get_collection("notifications").insert_one(match_notification)
+            
+            bot.reply_to(message, f"🎉 **It's a match!** 🎉\n\nYou and {target_name} liked each other!")
+        else:
+            bot.reply_to(message, f"❤️ You liked {target_name}!")
     
-    if like1 and like2:
-        # Update both as mutual
-        db.get_collection("likes").update_many(
-            {"$or": [
-                {"from_user": user1_id, "to_user": user2_id},
-                {"from_user": user2_id, "to_user": user1_id}
-            ]},
-            {"$set": {"is_mutual": True}}
-        )
-        
-        # Get names
-        user1 = db.get_collection("users").find_one({"user_id": user1_id})
-        user2 = db.get_collection("users").find_one({"user_id": user2_id})
-        
-        user1_name = user1.get('first_name', 'Someone') if user1 else 'Someone'
-        user2_name = user2.get('first_name', 'Someone') if user2 else 'Someone'
-        
-        # Send mutual match notifications
-        send_mutual_match_notification(bot, user1_id, user2_id, user1_name, user2_name)
-        
-        return True
+    from handlers.profile import show_main_menu
+    show_main_menu(bot, message.chat.id)
+
+
+def handle_reply_from_notification(bot, message, user_temp_data):
+    """Handle reply button from message notification"""
+    user_id = message.from_user.id
+    data = user_temp_data.get(user_id, {})
+    target_id = data.get('chat_user_id')
+    target_name = data.get('chat_user_name')
     
-    return False
-
-
-def get_unread_count(user_id):
-    """Get unread notification count for user"""
-    return db.get_collection("notifications").count_documents({
-        "user_id": user_id,
-        "is_read": False
-    })
-
-
-def mark_all_as_read(user_id):
-    """Mark all notifications as read for user"""
-    result = db.get_collection("notifications").update_many(
-        {"user_id": user_id, "is_read": False},
-        {"$set": {"is_read": True}}
-    )
-    return result.modified_count
-
-
-def delete_old_notifications(days=30):
-    """Delete notifications older than specified days"""
-    from datetime import timedelta
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    if not target_id:
+        bot.reply_to(message, "❌ User not found!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
     
-    result = db.get_collection("notifications").delete_many({
-        "created_at": {"$lt": cutoff}
-    })
-    return result.deleted_count
+    # Start chat session
+    from handlers.chat import start_chat_session
+    start_chat_session(bot, message, user_id, target_id, target_name)
+
+
+def handle_chat_from_notification(bot, message, user_temp_data):
+    """Handle chat button from notification (mutual match)"""
+    user_id = message.from_user.id
+    data = user_temp_data.get(user_id, {})
+    target_id = data.get('view_user_id')
+    target_name = data.get('view_user_name')
+    
+    if not target_id:
+        bot.reply_to(message, "❌ User not found!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
+    
+    # Start chat session
+    from handlers.chat import start_chat_session
+    start_chat_session(bot, message, user_id, target_id, target_name)
