@@ -2,7 +2,6 @@ import logging
 from datetime import datetime
 from telebot import types
 from database import get_db
-from handlers.notifications import send_message_notification
 
 logger = logging.getLogger(__name__)
 db = get_db()
@@ -14,7 +13,7 @@ active_chats = {}
 def start_chat_session(bot, message, user_id, target_id, target_name=None):
     """Start a chat session between two users"""
     if not target_name:
-        target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+        target_profile = db.get_collection("profiles").find_one({"user_id": target_id, "is_active": True})
         target_name = target_profile.get('name', 'User') if target_profile else 'User'
     
     # Store chat session
@@ -23,6 +22,9 @@ def start_chat_session(bot, message, user_id, target_id, target_name=None):
         'target_name': target_name,
         'chat_id': message.chat.id
     }
+    
+    # Also store for target so they can reply
+    # This is stored separately when they start chatting
     
     # Show chat interface with bottom buttons
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -97,16 +99,23 @@ def handle_chat_message(bot, message, user_states, user_temp_data):
     
     # Send notification to target user
     try:
-        notification = {
-            "user_id": target_id,
-            "type": "message",
-            "from_user_id": user_id,
-            "from_name": message.from_user.first_name,
-            "message": message_text[:100],
-            "is_read": False,
-            "created_at": datetime.utcnow()
-        }
-        db.get_collection("notifications").insert_one(notification)
+        # Check if target has an active chat session with this user
+        target_chat_session = active_chats.get(target_id)
+        is_target_online = target_chat_session and target_chat_session.get('target_id') == user_id
+        
+        if not is_target_online:
+            # Only send notification if target is not already in this chat
+            notification = {
+                "user_id": target_id,
+                "type": "message",
+                "from_user_id": user_id,
+                "from_name": message.from_user.first_name,
+                "message": message_text[:100],
+                "is_read": False,
+                "created_at": datetime.utcnow()
+            }
+            db.get_collection("notifications").insert_one(notification)
+            logger.info(f"Message notification sent to {target_id} from {user_id}")
     except Exception as e:
         logger.error(f"Failed to send notification: {e}")
     
@@ -220,9 +229,9 @@ def handle_chat_callback(bot, call, user_states, user_temp_data):
         return
     
     # Get target profile
-    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+    target_profile = db.get_collection("profiles").find_one({"user_id": target_id, "is_active": True})
     if not target_profile:
-        bot.answer_callback_query(call.id, "User not found!")
+        bot.answer_callback_query(call.id, "User not found or deleted!")
         return
     
     target_name = target_profile.get('name', 'User')
@@ -230,10 +239,9 @@ def handle_chat_callback(bot, call, user_states, user_temp_data):
     
     # Check if mutual match exists
     is_mutual = db.get_collection("likes").find_one({
-        "$and": [
-            {"from_user": user_id, "to_user": target_id, "is_mutual": True},
-            {"from_user": target_id, "to_user": user_id, "is_mutual": True}
-        ]
+        "from_user": user_id,
+        "to_user": target_id,
+        "is_mutual": True
     })
     
     if not is_mutual:
