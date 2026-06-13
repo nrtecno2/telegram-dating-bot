@@ -17,7 +17,7 @@ def handle_view_profiles(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     
     # Check if user has profile
-    my_profile = db.get_collection("profiles").find_one({"user_id": user_id})
+    my_profile = db.get_collection("profiles").find_one({"user_id": user_id, "is_active": True})
     if not my_profile:
         bot.reply_to(message, "❌ You need to create a profile first!\nUse /start to begin.")
         return
@@ -41,10 +41,10 @@ def handle_view_profiles(bot, message, user_states, user_temp_data):
     
     preference = user.get('preference', 'both')
     
-    # Build query filter
+    # Build query filter - ONLY ACTIVE PROFILES
     query_filter = {
         "user_id": {"$ne": user_id},
-        "is_active": True
+        "is_active": True  # IMPORTANT: Exclude deleted profiles
     }
     
     if preference == 'male':
@@ -76,7 +76,7 @@ def handle_view_profiles(bot, message, user_states, user_temp_data):
     
     # If no profiles found, reset and show all except liked ones
     if not profiles:
-        # Get all profiles again without liked filter (but still exclude self and liked)
+        # Get all profiles again without liked filter (but still exclude self and deleted)
         if my_profile.get('latitude') and my_profile.get('longitude'):
             nearby = get_nearby_profiles(
                 my_profile['latitude'],
@@ -92,7 +92,6 @@ def handle_view_profiles(bot, message, user_states, user_temp_data):
         profiles = [p for p in profiles if p['user_id'] not in liked_users]
         
         if not profiles:
-            # Really no profiles at all
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
             btn_refresh = types.KeyboardButton("🔄 Refresh")
             btn_menu = types.KeyboardButton("🏠 Main Menu")
@@ -174,26 +173,23 @@ def show_profile(bot, user_id):
     # Store current profile user_id in session for actions
     session['current_profile_id'] = profile['user_id']
     
-    # Send media if available
+    # Send media if available - FIXED to show photos/videos properly
     media_list = profile.get('media', [])
     if media_list and len(media_list) > 0:
-        # Try to send first media as photo/video with caption
+        # Send first media with caption
         first_media = media_list[0]
         
-        # Check if it's a photo or video based on URL or type
-        if first_media.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')) or 'photo' in first_media.lower():
+        try:
+            # Try to send as photo (most common)
+            bot.send_photo(
+                session['chat_id'],
+                photo=first_media,
+                caption=text,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
             try:
-                bot.send_photo(
-                    session['chat_id'],
-                    photo=first_media,
-                    caption=text,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Failed to send photo: {e}")
-                bot.send_message(session['chat_id'], text, parse_mode='Markdown')
-        else:
-            try:
+                # If photo fails, try as video
                 bot.send_video(
                     session['chat_id'],
                     video=first_media,
@@ -201,11 +197,11 @@ def show_profile(bot, user_id):
                     parse_mode='Markdown'
                 )
             except Exception as e:
-                logger.error(f"Failed to send video: {e}")
+                logger.error(f"Failed to send media: {e}")
                 bot.send_message(session['chat_id'], text, parse_mode='Markdown')
         
-        # Send remaining media as separate messages (without caption)
-        for media_url in media_list[1:3]:  # Max 3 media
+        # Send remaining media (max 2 more)
+        for media_url in media_list[1:3]:
             try:
                 if media_url.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')):
                     bot.send_photo(session['chat_id'], photo=media_url)
@@ -240,9 +236,11 @@ def handle_like_action(bot, message, user_states, user_temp_data):
         return
     
     # Get target profile
-    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+    target_profile = db.get_collection("profiles").find_one({"user_id": target_id, "is_active": True})
     if not target_profile:
-        bot.reply_to(message, "❌ Profile not found!")
+        bot.reply_to(message, "❌ Profile not found or deleted!")
+        session['current_index'] += 1
+        show_profile(bot, user_id)
         return
     
     # Check if already liked
@@ -293,17 +291,27 @@ def handle_like_action(bot, message, user_states, user_temp_data):
             )
             
             # Send mutual match notification to both
-            for uid, name in [(target_id, message.from_user.first_name), (user_id, target_profile.get('name'))]:
-                match_notification = {
-                    "user_id": uid,
-                    "type": "mutual_match",
-                    "from_user_id": user_id if uid == target_id else target_id,
-                    "from_name": name,
-                    "message": f"🎉 It's a match! You and {name} liked each other!",
-                    "is_read": False,
-                    "created_at": datetime.utcnow()
-                }
-                db.get_collection("notifications").insert_one(match_notification)
+            match_notification1 = {
+                "user_id": target_id,
+                "type": "mutual_match",
+                "from_user_id": user_id,
+                "from_name": message.from_user.first_name,
+                "message": f"🎉 It's a match! You and {message.from_user.first_name} liked each other!",
+                "is_read": False,
+                "created_at": datetime.utcnow()
+            }
+            db.get_collection("notifications").insert_one(match_notification1)
+            
+            match_notification2 = {
+                "user_id": user_id,
+                "type": "mutual_match",
+                "from_user_id": target_id,
+                "from_name": target_profile.get('name'),
+                "message": f"🎉 It's a match! You and {target_profile.get('name')} liked each other!",
+                "is_read": False,
+                "created_at": datetime.utcnow()
+            }
+            db.get_collection("notifications").insert_one(match_notification2)
             
             bot.reply_to(message, "🎉 **It's a match!** 🎉\n\nYou can now chat with this user!")
         else:
@@ -359,22 +367,30 @@ def handle_chat_from_profile(bot, message, user_states, user_temp_data):
         bot.reply_to(message, "❌ Error: No profile selected.")
         return
     
+    # Get target profile
+    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+    if not target_profile:
+        bot.reply_to(message, "❌ User not found!")
+        return
+    
+    target_name = target_profile.get('name', 'User')
+    
     # Check if mutual match exists
     is_mutual = db.get_collection("likes").find_one({
-        "$and": [
-            {"from_user": user_id, "to_user": target_id, "is_mutual": True},
-            {"from_user": target_id, "to_user": user_id, "is_mutual": True}
-        ]
+        "from_user": user_id,
+        "to_user": target_id,
+        "is_mutual": True
     })
     
     if not is_mutual:
-        # Check if they have liked each other
+        # Check if both have liked each other
         like1 = db.get_collection("likes").find_one({"from_user": user_id, "to_user": target_id})
         like2 = db.get_collection("likes").find_one({"from_user": target_id, "to_user": user_id})
         
         if like1 and like2:
             is_mutual = True
-        else:
+        
+        if not is_mutual:
             bot.reply_to(
                 message,
                 "💬 **Cannot Chat**\n\n"
@@ -383,16 +399,16 @@ def handle_chat_from_profile(bot, message, user_states, user_temp_data):
             )
             return
     
-    # Redirect to chat
+    # Start chat session
     from handlers.chat import start_chat_session
-    start_chat_session(bot, message, user_id, target_id)
+    start_chat_session(bot, message, user_id, target_id, target_name)
 
 
 def handle_my_profile(bot, message):
-    """Show user's own profile"""
+    """Show user's own profile with media"""
     user_id = message.from_user.id
     
-    profile = db.get_collection("profiles").find_one({"user_id": user_id})
+    profile = db.get_collection("profiles").find_one({"user_id": user_id, "is_active": True})
     if not profile:
         bot.reply_to(message, "❌ No profile found. Use /start to create one.")
         return
@@ -419,7 +435,7 @@ def handle_my_profile(bot, message):
     btn_menu = types.KeyboardButton("🏠 Main Menu")
     markup.add(btn_edit, btn_menu)
     
-    # Send media if available
+    # Send media if available - FIXED to show photos/videos
     media_list = profile.get('media', [])
     if media_list and len(media_list) > 0:
         try:
@@ -430,10 +446,28 @@ def handle_my_profile(bot, message):
                 parse_mode='Markdown'
             )
         except Exception as e:
-            logger.error(f"Failed to send profile photo: {e}")
-            bot.reply_to(message, text, parse_mode='Markdown')
+            try:
+                bot.send_video(
+                    message.chat.id,
+                    video=media_list[0],
+                    caption=text,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send profile media: {e}")
+                bot.send_message(message.chat.id, text, parse_mode='Markdown')
+        
+        # Send remaining media
+        for media_url in media_list[1:3]:
+            try:
+                if media_url.endswith(('jpg', 'jpeg', 'png', 'gif', 'webp')):
+                    bot.send_photo(message.chat.id, photo=media_url)
+                else:
+                    bot.send_video(message.chat.id, video=media_url)
+            except Exception as e:
+                logger.error(f"Failed to send additional media: {e}")
     else:
-        bot.reply_to(message, text, parse_mode='Markdown')
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
     
     bot.send_message(
         message.chat.id,
