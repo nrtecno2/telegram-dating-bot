@@ -1,4 +1,4 @@
-import logging
+  import logging
 from datetime import datetime
 from telebot import types
 from database import get_db
@@ -20,9 +20,7 @@ def handle_name(bot, message, user_states, user_temp_data):
     user_states[user_id] = "awaiting_gender"
     
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn_male = types.KeyboardButton("👨 Male")
-    btn_female = types.KeyboardButton("👩 Female")
-    markup.add(btn_male, btn_female)
+    markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
     
     bot.reply_to(message, f"✅ Name: {name}\n\nNow select your **Gender**:", reply_markup=markup)
 
@@ -61,11 +59,18 @@ def handle_age(bot, message, user_states, user_temp_data):
     user_states[user_id] = "awaiting_location"
     
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
-    btn_location = types.KeyboardButton("📍 Send Live Location", request_location=True)
-    btn_skip = types.KeyboardButton("⏭️ Skip Location")
-    markup.add(btn_location, btn_skip)
+    markup.add(types.KeyboardButton("📍 Send Live Location", request_location=True))
+    markup.add(types.KeyboardButton("⏭️ Skip Location"))
     
-    bot.reply_to(message, f"✅ Age: {age}\n\n📍 **Share your location for better matches!**\n\n⚠️ Location ka upyog:\n├ → Aapke nearby profiles dikhane ke liye\n├ → 50km radius ke log dikhenge\n└ → Aapki privacy safe hai\n\n**Option 1:** Share live location (recommended)\n**Option 2:** Type city name (e.g., Mumbai, Delhi)\n**Option 3:** Tap 'Skip Location' to continue\n\n📍 Send location or type city name:", reply_markup=markup)
+    bot.reply_to(message, 
+        f"✅ Age: {age}\n\n📍 **Share your location for better matches!**\n\n"
+        f"⚠️ Location ka upyog:\n├ → Aapke nearby profiles dikhane ke liye\n"
+        f"├ → 50km radius ke log dikhenge\n└ → Aapki privacy safe hai\n\n"
+        f"**Option 1:** Share live location (recommended)\n"
+        f"**Option 2:** Type city name (e.g., Mumbai, Delhi)\n"
+        f"**Option 3:** Tap 'Skip Location' to continue\n\n"
+        f"📍 Send location or type city name:", 
+        reply_markup=markup)
 
 
 def handle_location(bot, message, user_states, user_temp_data):
@@ -180,43 +185,48 @@ def handle_confirm_callback(bot, message, user_states, user_temp_data):
         if user_id in user_temp_data:
             del user_temp_data[user_id]
         markup = types.ReplyKeyboardRemove()
-        bot.reply_to(message, "❌ Profile creation cancelled.", reply_markup=markup)
+        bot.reply_to(message, "❌ Profile creation cancelled. Use /start to try again.", reply_markup=markup)
         return
     
-    if action != "✅ Confirm Profile":
-        bot.reply_to(message, "❌ Please use the buttons below:")
+    if action == "✅ Confirm Profile":
+        temp = user_temp_data.get(user_id, {})
+        media_list = temp.get('media_list', [])
+        
+        media_urls = []
+        for media in media_list:
+            url = upload_media_to_channel(bot, media['file_id'], user_id, media['type'])
+            if url:
+                media_urls.append(url)
+        
+        profile = {
+            "user_id": user_id, "username": message.from_user.username,
+            "name": temp.get('name'), "gender": temp.get('gender'),
+            "age": temp.get('age'), "location_text": temp.get('location_text', ''),
+            "latitude": temp.get('latitude'), "longitude": temp.get('longitude'),
+            "about": temp.get('about', ''), "media": media_urls,
+            "created_at": datetime.utcnow(), "is_active": True
+        }
+        db.get_collection("profiles").insert_one(profile)
+        
+        user_data = {
+            "user_id": user_id, "username": message.from_user.username,
+            "first_name": message.from_user.first_name, "setup_complete": False,
+            "created_at": datetime.utcnow(), "last_active": datetime.utcnow()
+        }
+        db.get_collection("users").update_one({"user_id": user_id}, {"$set": user_data}, upsert=True)
+        
+        if user_id in user_states:
+            del user_states[user_id]
+        if user_id in user_temp_data:
+            del user_temp_data[user_id]
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"), types.KeyboardButton("👥 Both"))
+        
+        bot.reply_to(message, "🎉 **Profile Created Successfully!** 🎉\n\nWho do you want to see in your feed?", reply_markup=markup)
         return
     
-    temp = user_temp_data.get(user_id, {})
-    media_list = temp.get('media_list', [])
-    
-    media_urls = []
-    for media in media_list:
-        url = upload_media_to_channel(bot, media['file_id'], user_id, media['type'])
-        if url:
-            media_urls.append(url)
-    
-    profile = {
-        "user_id": user_id, "username": message.from_user.username,
-        "name": temp.get('name'), "gender": temp.get('gender'),
-        "age": temp.get('age'), "location_text": temp.get('location_text', ''),
-        "latitude": temp.get('latitude'), "longitude": temp.get('longitude'),
-        "about": temp.get('about', ''), "media": media_urls,
-        "created_at": datetime.utcnow(), "is_active": True
-    }
-    db.get_collection("profiles").insert_one(profile)
-    
-    user_data = {
-        "user_id": user_id, "username": message.from_user.username,
-        "first_name": message.from_user.first_name, "setup_complete": False,
-        "created_at": datetime.utcnow(), "last_active": datetime.utcnow()
-    }
-    db.get_collection("users").update_one({"user_id": user_id}, {"$set": user_data}, upsert=True)
-    
-    user_states[user_id] = "awaiting_preference"
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"), types.KeyboardButton("👥 Both"))
-    bot.reply_to(message, "🎉 **Profile Created!** 🎉\n\nWho do you want to see?", reply_markup=markup)
+    bot.reply_to(message, "❌ Please use the Confirm or Cancel buttons below.")
 
 
 def handle_preference_callback(bot, message, user_states, user_temp_data):
@@ -247,17 +257,21 @@ def handle_preference_callback(bot, message, user_states, user_temp_data):
 
 def show_main_menu(bot, chat_id):
     unread_count = db.get_collection("notifications").count_documents({"user_id": chat_id, "is_read": False})
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👤 MY PROFILE"), types.KeyboardButton("👀 VIEW PROFILES"))
     markup.add(types.KeyboardButton(f"🔔 NOTIFICATIONS ({unread_count})"), types.KeyboardButton("🎯 CHANGE INTEREST"))
     markup.add(types.KeyboardButton("📊 MY STATS"), types.KeyboardButton("⚙️ SETTINGS"))
-    bot.send_message(chat_id, "🏠 **Main Menu**\n\nChoose an option:", reply_markup=markup)
+    
+    bot.send_message(chat_id, "🏠 **Main Menu**\n\nChoose an option from below:", reply_markup=markup)
+
 
 def handle_edit_profile(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     profile = db.get_collection("profiles").find_one({"user_id": user_id})
+    
     if not profile:
-        bot.reply_to(message, "❌ Profile not found!")
+        bot.reply_to(message, "❌ Profile not found! Use /start to create one.")
         return
     
     user_temp_data[user_id] = {'edit_mode': True, 'original_profile': profile, 'updated_data': profile.copy()}
@@ -269,7 +283,7 @@ def handle_edit_profile(bot, message, user_states, user_temp_data):
     markup.add(types.KeyboardButton("✏️ Edit About"), types.KeyboardButton("✏️ Edit Photos/Videos"))
     markup.add(types.KeyboardButton("💾 Save All Changes"), types.KeyboardButton("❌ Cancel"))
     
-    text = f"✏️ **EDIT PROFILE**\n\nCurrent:\n├ Name: {profile.get('name')}\n├ Gender: {profile.get('gender')}\n├ Age: {profile.get('age')}\n├ Location: {profile.get('location_text')}\n├ About: {profile.get('about', '')[:50]}\n└ Media: {len(profile.get('media', []))} files"
+    text = f"✏️ **EDIT PROFILE** ✏️\n\nCurrent Details:\n├ Name: {profile.get('name')}\n├ Gender: {profile.get('gender')}\n├ Age: {profile.get('age')}\n├ Location: {profile.get('location_text')}\n├ About: {profile.get('about', '')[:50]}\n└ Media: {len(profile.get('media', []))} files\n\nSelect what to edit:"
     bot.reply_to(message, text, reply_markup=markup, parse_mode='Markdown')
 
 
@@ -277,7 +291,7 @@ def handle_edit_name(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     user_states[user_id] = "editing_name"
     markup = types.ReplyKeyboardRemove()
-    bot.reply_to(message, "✏️ **Edit Name**\nSend new name (2-50 chars) or /skip:", reply_markup=markup, parse_mode='Markdown')
+    bot.reply_to(message, "✏️ **Edit Name**\n\nSend new name (2-50 chars) or /skip:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_name(bot, message, user_states, user_temp_data):
@@ -285,7 +299,7 @@ def process_edit_name(bot, message, user_states, user_temp_data):
     new_name = message.text.strip()
     
     if new_name == '/skip':
-        bot.reply_to(message, "✅ Name kept.")
+        bot.reply_to(message, "✅ Name kept as is.")
     elif len(new_name) < 2 or len(new_name) > 50:
         bot.reply_to(message, "❌ Name must be 2-50 chars. Try again or /skip:")
         return
@@ -301,14 +315,14 @@ def handle_edit_age(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     user_states[user_id] = "editing_age"
     markup = types.ReplyKeyboardRemove()
-    bot.reply_to(message, "✏️ **Edit Age**\nSend new age (18-100) or /skip:", reply_markup=markup, parse_mode='Markdown')
+    bot.reply_to(message, "✏️ **Edit Age**\n\nSend new age (18-100) or /skip:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_age(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     
     if message.text == '/skip':
-        bot.reply_to(message, "✅ Age kept.")
+        bot.reply_to(message, "✅ Age kept as is.")
     else:
         try:
             new_age = int(message.text.strip())
@@ -327,7 +341,7 @@ def process_edit_age(bot, message, user_states, user_temp_data):
 def handle_edit_gender(bot, message, user_states, user_temp_data):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
-    bot.reply_to(message, "✏️ **Edit Gender**\nSelect new gender:", reply_markup=markup, parse_mode='Markdown')
+    bot.reply_to(message, "✏️ **Edit Gender**\n\nSelect new gender:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_gender(bot, message, user_states, user_temp_data):
@@ -353,14 +367,16 @@ def handle_edit_location(bot, message, user_states, user_temp_data):
     user_states[user_id] = "editing_location"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("⏭️ Skip (keep current)"))
-    bot.reply_to(message, f"✏️ **Edit Location**\nCurrent: {user_temp_data[user_id]['updated_data'].get('location_text', 'Not set')}\nSend new location or tap Skip:", reply_markup=markup, parse_mode='Markdown')
+    
+    current_loc = user_temp_data[user_id].get('updated_data', {}).get('location_text', 'Not set')
+    bot.reply_to(message, f"✏️ **Edit Location**\n\nCurrent: {current_loc}\n\nSend new location or tap Skip:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_location(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     
     if message.text == "⏭️ Skip (keep current)":
-        bot.reply_to(message, "✅ Location kept.")
+        bot.reply_to(message, "✅ Location kept as is.")
     else:
         new_loc = message.text.strip()
         if len(new_loc) < 2:
@@ -378,14 +394,16 @@ def handle_edit_about(bot, message, user_states, user_temp_data):
     user_states[user_id] = "editing_about"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("⏭️ Skip (keep current)"))
-    bot.reply_to(message, f"✏️ **Edit About**\nCurrent: {user_temp_data[user_id]['updated_data'].get('about', 'Not set')[:100]}\nSend new about (max 500 chars) or Skip:", reply_markup=markup, parse_mode='Markdown')
+    
+    current_about = user_temp_data[user_id].get('updated_data', {}).get('about', 'Not set')[:100]
+    bot.reply_to(message, f"✏️ **Edit About**\n\nCurrent: {current_about}\n\nSend new about (max 500 chars) or Skip:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_about(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     
     if message.text == "⏭️ Skip (keep current)":
-        bot.reply_to(message, "✅ About kept.")
+        bot.reply_to(message, "✅ About kept as is.")
     else:
         new_about = message.text.strip()
         if len(new_about) > 500:
@@ -402,16 +420,18 @@ def handle_edit_media(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     user_states[user_id] = "editing_media"
     user_temp_data[user_id]['new_media_list'] = []
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("⏭️ Skip (keep current)"), types.KeyboardButton("✅ Done with media"))
-    bot.reply_to(message, "✏️ **Edit Photos/Videos**\nSend new photos/videos (max 3), then tap 'Done'\nor tap 'Skip' to keep current:", reply_markup=markup, parse_mode='Markdown')
+    
+    bot.reply_to(message, "✏️ **Edit Photos/Videos**\n\nSend new photos/videos (max 3), then tap 'Done'\nor tap 'Skip' to keep current:", reply_markup=markup, parse_mode='Markdown')
 
 
 def process_edit_media(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     
     if message.text == "⏭️ Skip (keep current)":
-        bot.reply_to(message, "✅ Media kept.")
+        bot.reply_to(message, "✅ Media kept as is.")
         user_states[user_id] = "editing_profile"
         show_edit_menu(bot, message, user_states, user_temp_data)
         return
@@ -422,12 +442,13 @@ def process_edit_media(bot, message, user_states, user_temp_data):
             user_temp_data[user_id]['updated_data']['media'] = new_media
             bot.reply_to(message, f"✅ Media updated! {len(new_media)} file(s) saved.")
         else:
-            bot.reply_to(message, "✅ No new media added.")
+            bot.reply_to(message, "✅ No new media added. Keeping current media.")
         user_states[user_id] = "editing_profile"
         show_edit_menu(bot, message, user_states, user_temp_data)
         return
     
     media_list = user_temp_data[user_id].get('new_media_list', [])
+    
     if len(media_list) >= 3:
         bot.reply_to(message, "❌ Max 3 files! Tap 'Done' to finish.")
         return
@@ -447,7 +468,7 @@ def process_edit_media(bot, message, user_states, user_temp_data):
         media_list.append(url)
         user_temp_data[user_id]['new_media_list'] = media_list
         remaining = 3 - len(media_list)
-        bot.reply_to(message, f"✅ Media {len(media_list)}/3 added!\n📷 {remaining} remaining.")
+        bot.reply_to(message, f"✅ Media {len(media_list)}/3 added!\n📷 {remaining} remaining. Send more or tap 'Done'.")
     else:
         bot.reply_to(message, "❌ Upload failed. Try again.")
 
@@ -467,22 +488,29 @@ def save_edited_profile(bot, message, user_states, user_temp_data):
             update_fields[key] = updated_data[key]
     update_fields['updated_at'] = datetime.utcnow()
     
-    db.get_collection("profiles").update_one({"user_id": user_id}, {"$set": update_fields})
-    bot.reply_to(message, "✅ **Profile updated!**")
+    result = db.get_collection("profiles").update_one({"user_id": user_id}, {"$set": update_fields})
+    
+    if result.modified_count > 0:
+        bot.reply_to(message, "✅ **Profile updated successfully!**")
+    else:
+        bot.reply_to(message, "ℹ️ No changes were made to your profile.")
     
     if user_id in user_states:
         del user_states[user_id]
     if user_id in user_temp_data:
         del user_temp_data[user_id]
+    
     show_main_menu(bot, message.chat.id)
 
 
 def cancel_edit(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
+    
     if user_id in user_states:
         del user_states[user_id]
     if user_id in user_temp_data:
         del user_temp_data[user_id]
+    
     bot.reply_to(message, "❌ Editing cancelled.")
     show_main_menu(bot, message.chat.id)
 
@@ -497,17 +525,19 @@ def show_edit_menu(bot, message, user_states, user_temp_data):
     markup.add(types.KeyboardButton("✏️ Edit About"), types.KeyboardButton("✏️ Edit Photos/Videos"))
     markup.add(types.KeyboardButton("💾 Save All Changes"), types.KeyboardButton("❌ Cancel"))
     
-    text = f"✏️ **EDIT PROFILE**\n\nUpdated:\n├ Name: {data.get('name')}\n├ Gender: {data.get('gender')}\n├ Age: {data.get('age')}\n├ Location: {data.get('location_text')}\n├ About: {data.get('about', '')[:50]}\n└ Media: {len(data.get('media', []))} files\n\nSelect option or Save:"
+    text = f"✏️ **EDIT PROFILE** ✏️\n\nUpdated Details:\n├ Name: {data.get('name', 'Not set')}\n├ Gender: {data.get('gender', 'Not set')}\n├ Age: {data.get('age', 'Not set')}\n├ Location: {data.get('location_text', 'Not set')}\n├ About: {data.get('about', 'Not set')[:50]}\n└ Media: {len(data.get('media', []))} files\n\nSelect option or Save:"
     bot.reply_to(message, text, reply_markup=markup, parse_mode='Markdown')
 
 
 def handle_change_interest(bot, message, user_states, user_temp_data):
     user_id = message.from_user.id
     user_states[user_id] = "awaiting_interest_change"
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
     markup.add(types.KeyboardButton("👥 Both"), types.KeyboardButton("🔙 Back to Main Menu"))
-    bot.reply_to(message, "🎯 **Change Interest**\n\nWho do you want to see?", reply_markup=markup)
+    
+    bot.reply_to(message, "🎯 **Change Interest / Preference**\n\nSelect who you want to see:", reply_markup=markup)
 
 
 def handle_update_preference(bot, message, user_states, user_temp_data):
@@ -516,46 +546,48 @@ def handle_update_preference(bot, message, user_states, user_temp_data):
     
     if pref_text == "👨 Male":
         db.get_collection("users").update_one({"user_id": user_id}, {"$set": {"preference": "male"}})
-        bot.reply_to(message, "✅ Preference: Male")
+        bot.reply_to(message, "✅ Preference updated to: Male")
     elif pref_text == "👩 Female":
         db.get_collection("users").update_one({"user_id": user_id}, {"$set": {"preference": "female"}})
-        bot.reply_to(message, "✅ Preference: Female")
+        bot.reply_to(message, "✅ Preference updated to: Female")
     elif pref_text == "👥 Both":
         db.get_collection("users").update_one({"user_id": user_id}, {"$set": {"preference": "both"}})
-        bot.reply_to(message, "✅ Preference: Both")
+        bot.reply_to(message, "✅ Preference updated to: Both")
     elif pref_text == "🔙 Back to Main Menu":
         show_main_menu(bot, message.chat.id)
         return
     else:
-        bot.reply_to(message, "❌ Use the buttons below:")
+        bot.reply_to(message, "❌ Please use the buttons below:")
         return
     
     if user_id in user_states:
         del user_states[user_id]
+    
     show_main_menu(bot, message.chat.id)
 
 
 def handle_my_stats(bot, message):
     user_id = message.from_user.id
+    
     user = db.get_collection("users").find_one({"user_id": user_id})
     profile = db.get_collection("profiles").find_one({"user_id": user_id})
     likes_given = db.get_collection("likes").count_documents({"from_user": user_id})
     likes_received = db.get_collection("likes").count_documents({"to_user": user_id})
     
-    text = f"📊 **YOUR STATS**\n\n👤 Profile Views: {profile.get('profile_views', 0) if profile else 0}\n❤️ Likes Given: {likes_given}\n💕 Likes Received: {likes_received}\n🎯 Interest: {user.get('preference', 'Not set') if user else 'Not set'}\n\nKeep interacting! 🔥"
-    bot.reply_to(message, text, parse_mode='Markdown')
+    stats_text = f"📊 **YOUR STATS** 📊\n\n👤 Profile Views: {profile.get('profile_views', 0) if profile else 0}\n❤️ Likes Given: {likes_given}\n💕 Likes Received: {likes_received}\n🎯 Interest: {user.get('preference', 'Not set') if user else 'Not set'}\n\nKeep interacting! 🔥"
+    bot.reply_to(message, stats_text, parse_mode='Markdown')
 
 
 def handle_settings(bot, message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("🗑 Delete Account"), types.KeyboardButton("🔙 Back to Main Menu"))
-    bot.reply_to(message, "⚙️ **SETTINGS**\n\nChoose an option:", reply_markup=markup)
+    bot.reply_to(message, "⚙️ **SETTINGS** ⚙️\n\nChoose an option:", reply_markup=markup)
 
 
 def handle_delete_account(bot, message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("🗑 Confirm Delete"), types.KeyboardButton("🔙 Cancel"))
-    bot.reply_to(message, "⚠️ **DELETE ACCOUNT**\n\nThis is permanent!\nTap 'Confirm Delete' to proceed:", reply_markup=markup)
+    bot.reply_to(message, "⚠️ **DELETE ACCOUNT** ⚠️\n\nThis is permanent!\nTap 'Confirm Delete' to proceed:", reply_markup=markup)
 
 
 def handle_confirm_delete(bot, message):
