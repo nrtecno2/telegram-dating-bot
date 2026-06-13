@@ -11,97 +11,50 @@ db = get_db()
 active_chats = {}
 
 
-def handle_chat_callback(bot, call, user_states, user_temp_data):
-    """Handle chat button callback - start a chat session"""
-    user_id = call.from_user.id
-    target_id = int(call.data.split('_')[1])
-    
-    bot.answer_callback_query(call.id)
-    
-    # Get target profile
-    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
-    if not target_profile:
-        bot.edit_message_text(
-            "❌ User not found!",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
-        return
-    
-    target_name = target_profile.get('name', 'User')
-    
-    # Check if mutual match exists
-    is_mutual = db.get_collection("likes").find_one({
-        "$and": [
-            {"from_user": user_id, "to_user": target_id, "is_mutual": True},
-            {"from_user": target_id, "to_user": user_id, "is_mutual": True}
-        ]
-    })
-    
-    if not is_mutual:
-        # Check if they have liked each other
-        like1 = db.get_collection("likes").find_one({"from_user": user_id, "to_user": target_id})
-        like2 = db.get_collection("likes").find_one({"from_user": target_id, "to_user": user_id})
-        
-        if like1 and like2:
-            is_mutual = True
-        else:
-            # Not mutual match - cannot chat
-            markup = types.InlineKeyboardMarkup()
-            btn_like = types.InlineKeyboardButton("❤️ Like First", callback_data=f"like_{target_id}")
-            btn_back = types.InlineKeyboardButton("🔙 Back", callback_data="view_profiles")
-            markup.add(btn_like, btn_back)
-            
-            bot.edit_message_text(
-                f"💬 **Cannot Chat with {target_name}**\n\n"
-                f"You can only chat with mutual matches.\n\n"
-                f"💡 Tip: Like each other first to start chatting!",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup
-            )
-            return
+def start_chat_session(bot, message, user_id, target_id, target_name=None):
+    """Start a chat session between two users"""
+    if not target_name:
+        target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+        target_name = target_profile.get('name', 'User') if target_profile else 'User'
     
     # Store chat session
     active_chats[user_id] = {
         'target_id': target_id,
         'target_name': target_name,
-        'chat_id': call.message.chat.id,
-        'message_id': call.message.message_id
+        'chat_id': message.chat.id
     }
     
-    # Set user state
-    user_states[user_id] = "awaiting_chat_message"
-    user_temp_data[user_id] = {'chat_target': target_id, 'chat_target_name': target_name}
-    
-    # Show chat interface
-    markup = types.InlineKeyboardMarkup()
-    btn_cancel = types.InlineKeyboardButton("❌ Cancel Chat", callback_data="cancel_chat")
-    btn_history = types.InlineKeyboardButton("📜 View History", callback_data=f"get_conversation_{target_id}")
+    # Show chat interface with bottom buttons
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_cancel = types.KeyboardButton("❌ CANCEL CHAT")
+    btn_history = types.KeyboardButton("📜 VIEW HISTORY")
     markup.add(btn_cancel, btn_history)
     
-    bot.edit_message_text(
+    bot.reply_to(
+        message,
         f"💬 **Chat with {target_name}** 💬\n\n"
         f"Send your message below.\n"
         f"Supports text, photos, and videos.\n\n"
-        f"Press Cancel to stop chatting.",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
+        f"Press CANCEL CHAT to stop.",
+        reply_markup=markup,
+        parse_mode='Markdown'
     )
 
 
 def handle_chat_message(bot, message, user_states, user_temp_data):
     """Handle incoming chat messages"""
     user_id = message.from_user.id
-    chat_data = user_temp_data.get(user_id, {})
-    target_id = chat_data.get('chat_target')
-    target_name = chat_data.get('chat_target_name')
+    chat_session = active_chats.get(user_id)
+    
+    if not chat_session:
+        bot.reply_to(message, "❌ No active chat session. Use VIEW PROFILES to find matches.")
+        return
+    
+    target_id = chat_session.get('target_id')
+    target_name = chat_session.get('target_name')
     
     if not target_id:
-        bot.reply_to(message, "❌ No active chat session. Use /start to begin.")
-        if user_id in user_states:
-            del user_states[user_id]
+        bot.reply_to(message, "❌ Chat session error. Please start over.")
         return
     
     # Process message based on type
@@ -111,6 +64,13 @@ def handle_chat_message(bot, message, user_states, user_temp_data):
     
     if message.text:
         message_text = message.text.strip()
+        # Check for cancel/history commands
+        if message_text == "❌ CANCEL CHAT":
+            handle_cancel_chat(bot, message, user_states, user_temp_data)
+            return
+        elif message_text == "📜 VIEW HISTORY":
+            handle_get_conversation(bot, message, user_id, target_id, target_name)
+            return
     elif message.photo:
         media_file_id = message.photo[-1].file_id
         media_type = 'photo'
@@ -120,7 +80,7 @@ def handle_chat_message(bot, message, user_states, user_temp_data):
         media_type = 'video'
         message_text = message.caption if message.caption else "🎥 Sent a video"
     else:
-        bot.reply_to(message, "❌ Unsupported message type. Send text, photo, or video.")
+        bot.reply_to(message, "❌ Send text, photo, or video only!")
         return
     
     # Save message to database
@@ -137,65 +97,42 @@ def handle_chat_message(bot, message, user_states, user_temp_data):
     
     # Send notification to target user
     try:
-        send_message_notification(
-            bot, target_id, user_id, 
-            message.from_user.first_name, 
-            message_text[:100]
-        )
+        notification = {
+            "user_id": target_id,
+            "type": "message",
+            "from_user_id": user_id,
+            "from_name": message.from_user.first_name,
+            "message": message_text[:100],
+            "is_read": False,
+            "created_at": datetime.utcnow()
+        }
+        db.get_collection("notifications").insert_one(notification)
     except Exception as e:
         logger.error(f"Failed to send notification: {e}")
     
     # Send confirmation to sender
-    markup = types.InlineKeyboardMarkup()
-    btn_back = types.InlineKeyboardButton("🔙 Continue Chatting", callback_data=f"chat_{target_id}")
-    btn_menu = types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
-    markup.add(btn_back, btn_menu)
-    
     bot.reply_to(
         message,
         f"✅ **Message sent to {target_name}!**\n\n"
-        f"They will be notified when they're online.",
-        reply_markup=markup
+        f"They will be notified when they're online."
     )
 
 
-def handle_cancel_chat(bot, call, user_states, user_temp_data):
+def handle_cancel_chat(bot, message, user_states, user_temp_data):
     """Cancel active chat session"""
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id)
+    user_id = message.from_user.id
     
     # Clear chat session
     if user_id in active_chats:
         del active_chats[user_id]
-    if user_id in user_states:
-        del user_states[user_id]
-    if user_id in user_temp_data:
-        del user_temp_data[user_id]
     
-    # Return to main menu
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_profile = types.InlineKeyboardButton("👤 MY PROFILE", callback_data="my_profile")
-    btn_view = types.InlineKeyboardButton("👀 VIEW PROFILES", callback_data="view_profiles")
-    btn_notify = types.InlineKeyboardButton("🔔 NOTIFICATIONS", callback_data="notifications")
-    markup.add(btn_profile, btn_view, btn_notify)
-    
-    bot.edit_message_text(
-        "❌ **Chat cancelled**\n\n"
-        "Returning to main menu...",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
-    )
+    # Return to main menu with bottom buttons
+    from handlers.profile import show_main_menu
+    show_main_menu(bot, message.chat.id)
 
 
-def get_conversation(bot, call, user_states, user_temp_data):
+def handle_get_conversation(bot, message, user_id, target_id, target_name):
     """Get conversation history between two users"""
-    user_id = call.from_user.id
-    target_id = int(call.data.split('_')[2])  # format: get_conversation_12345
-    
-    bot.answer_callback_query(call.id)
-    
     # Get conversation history
     messages = list(db.get_collection("messages").find({
         "$or": [
@@ -205,7 +142,7 @@ def get_conversation(bot, call, user_states, user_temp_data):
     }).sort("created_at", -1).limit(50))
     
     if not messages:
-        bot.answer_callback_query(call.id, "No conversation history yet!", show_alert=True)
+        bot.reply_to(message, "📭 No conversation history yet!")
         return
     
     # Mark unread messages as read
@@ -215,10 +152,8 @@ def get_conversation(bot, call, user_states, user_temp_data):
     )
     
     # Build conversation text
-    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
-    target_name = target_profile.get('name', 'User') if target_profile else 'User'
-    
     text = f"💬 **Conversation with {target_name}**\n\n"
+    text += "─" * 30 + "\n\n"
     
     for msg in reversed(messages):
         sender = "You" if msg['from_user'] == user_id else target_name
@@ -234,18 +169,92 @@ def get_conversation(bot, call, user_states, user_temp_data):
     if len(text) > 4000:
         text = text[:4000] + "\n\n... (truncated)"
     
-    # Add reply button
-    markup = types.InlineKeyboardMarkup()
-    btn_reply = types.InlineKeyboardButton("✏️ Send Message", callback_data=f"chat_{target_id}")
-    btn_back = types.InlineKeyboardButton("🔙 Back to Chat", callback_data=f"chat_{target_id}")
-    markup.add(btn_reply, btn_back)
+    # Bottom buttons
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_back = types.KeyboardButton("🔙 BACK TO CHAT")
+    btn_menu = types.KeyboardButton("🏠 MAIN MENU")
+    markup.add(btn_back, btn_menu)
     
-    bot.edit_message_text(
-        text,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
+    bot.reply_to(message, text, reply_markup=markup, parse_mode='Markdown')
+
+
+def handle_back_to_chat(bot, message, user_states, user_temp_data):
+    """Handle back to chat button from conversation history"""
+    user_id = message.from_user.id
+    chat_session = active_chats.get(user_id)
+    
+    if not chat_session:
+        bot.reply_to(message, "❌ No active chat session!")
+        from handlers.profile import show_main_menu
+        show_main_menu(bot, message.chat.id)
+        return
+    
+    target_id = chat_session.get('target_id')
+    target_name = chat_session.get('target_name')
+    
+    # Resume chat
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_cancel = types.KeyboardButton("❌ CANCEL CHAT")
+    btn_history = types.KeyboardButton("📜 VIEW HISTORY")
+    markup.add(btn_cancel, btn_history)
+    
+    bot.reply_to(
+        message,
+        f"💬 **Back to Chat with {target_name}** 💬\n\n"
+        f"Send your message below.",
+        reply_markup=markup,
+        parse_mode='Markdown'
     )
+
+
+def handle_chat_callback(bot, call, user_states, user_temp_data):
+    """Handle chat button from inline keyboard (for backward compatibility)"""
+    # Extract target_id from callback data
+    try:
+        target_id = int(call.data.split('_')[1])
+    except:
+        target_id = None
+    
+    if not target_id:
+        bot.answer_callback_query(call.id, "Error: User not found!")
+        return
+    
+    # Get target profile
+    target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
+    if not target_profile:
+        bot.answer_callback_query(call.id, "User not found!")
+        return
+    
+    target_name = target_profile.get('name', 'User')
+    user_id = call.from_user.id
+    
+    # Check if mutual match exists
+    is_mutual = db.get_collection("likes").find_one({
+        "$and": [
+            {"from_user": user_id, "to_user": target_id, "is_mutual": True},
+            {"from_user": target_id, "to_user": user_id, "is_mutual": True}
+        ]
+    })
+    
+    if not is_mutual:
+        like1 = db.get_collection("likes").find_one({"from_user": user_id, "to_user": target_id})
+        like2 = db.get_collection("likes").find_one({"from_user": target_id, "to_user": user_id})
+        
+        if not (like1 and like2):
+            bot.answer_callback_query(call.id, "❌ You can only chat with mutual matches!", show_alert=True)
+            return
+    
+    bot.answer_callback_query(call.id)
+    
+    # Create a dummy message object to work with
+    class DummyMessage:
+        def __init__(self, chat_id, from_user):
+            self.chat = type('obj', (object,), {'id': chat_id})
+            self.from_user = from_user
+    
+    dummy_message = DummyMessage(call.message.chat.id, call.from_user)
+    
+    start_chat_session(bot, dummy_message, user_id, target_id, target_name)
 
 
 def get_unread_message_count(user_id):
