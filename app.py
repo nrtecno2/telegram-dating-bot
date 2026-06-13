@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from datetime import datetime
-from flask import Flask
+from flask import Flask, request, jsonify
 import telebot
 from telebot import types
 from dotenv import load_dotenv
@@ -30,18 +30,28 @@ def run_flask():
 from database import get_db
 
 # Import handlers
-from handlers.start import handle_start, handle_verify_callback, handle_continue_bot, handle_create_profile
+from handlers.start import handle_start, handle_channel_join, handle_verify_membership, start_profile_creation
 from handlers.profile import (
     handle_name, handle_gender_callback, handle_age, handle_location,
     handle_location_text, handle_about, handle_media, handle_confirm_callback,
-    handle_preference_callback, show_main_menu, handle_edit_profile
+    handle_preference_callback, show_main_menu, handle_edit_profile,
+    handle_change_interest, handle_update_preference, handle_my_stats,
+    handle_settings, handle_delete_account, handle_confirm_delete
 )
 from handlers.view_profiles import (
-    handle_view_profiles, handle_like_callback, handle_skip_callback,
-    handle_stop_callback, handle_my_profile
+    handle_view_profiles, handle_like_action, handle_skip_action,
+    handle_stop_viewing_action, handle_chat_from_profile, handle_my_profile,
+    handle_refresh_profiles
 )
-from handlers.notifications import handle_notifications
-from handlers.chat import handle_chat_callback, handle_chat_message, handle_cancel_chat
+from handlers.notifications import (
+    handle_notifications, handle_view_user_from_notification,
+    handle_like_from_notification, handle_reply_from_notification,
+    handle_chat_from_notification
+)
+from handlers.chat import (
+    start_chat_session, handle_chat_message, handle_cancel_chat,
+    handle_get_conversation, handle_back_to_chat, handle_chat_callback
+)
 
 # Configure logging
 logging.basicConfig(
@@ -58,7 +68,7 @@ if not BOT_TOKEN:
 # Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
 
-# Store user states
+# Store user states and temp data
 user_states = {}
 user_temp_data = {}
 
@@ -66,10 +76,13 @@ user_temp_data = {}
 # ========== COMMAND HANDLERS ==========
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    """Handle /start command"""
     handle_start(bot, message, user_states, user_temp_data)
+
 
 @bot.message_handler(commands=['cancel'])
 def cancel_command(message):
+    """Handle /cancel command"""
     user_id = message.from_user.id
     if user_id in user_states:
         del user_states[user_id]
@@ -77,8 +90,10 @@ def cancel_command(message):
         del user_temp_data[user_id]
     bot.reply_to(message, "❌ Operation cancelled. Use /start to begin again.")
 
+
 @bot.message_handler(commands=['done'])
 def done_command(message):
+    """Handle /done command for media completion"""
     user_id = message.from_user.id
     state = user_states.get(user_id)
     if state == "awaiting_media":
@@ -88,84 +103,245 @@ def done_command(message):
         bot.reply_to(message, "❌ Nothing to complete.")
 
 
-# ========== CALLBACK QUERY HANDLERS ==========
+# ========== BOTTOM BUTTON HANDLERS (ReplyKeyboardMarkup) ==========
+@bot.message_handler(func=lambda message: message.text == "📢 JOIN CHANNEL")
+def channel_join_handler(message):
+    handle_channel_join(bot, message, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✅ VERIFY MEMBERSHIP" or message.text == "🔄 VERIFY AGAIN")
+def verify_membership_handler(message):
+    handle_verify_membership(bot, message, user_states, user_temp_data)
+
+
+# Main Menu Bottom Buttons
+@bot.message_handler(func=lambda message: message.text == "👤 MY PROFILE")
+def my_profile_handler(message):
+    handle_my_profile(bot, message)
+
+
+@bot.message_handler(func=lambda message: message.text == "👀 VIEW PROFILES")
+def view_profiles_handler(message):
+    handle_view_profiles(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "🔔 NOTIFICATIONS" or message.text.startswith("🔔 NOTIFICATIONS"))
+def notifications_handler(message):
+    handle_notifications(bot, message)
+
+
+@bot.message_handler(func=lambda message: message.text == "🎯 CHANGE INTEREST")
+def change_interest_handler(message):
+    handle_change_interest(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "📊 MY STATS")
+def my_stats_handler(message):
+    handle_my_stats(bot, message)
+
+
+@bot.message_handler(func=lambda message: message.text == "⚙️ SETTINGS")
+def settings_handler(message):
+    handle_settings(bot, message)
+
+
+@bot.message_handler(func=lambda message: message.text == "🏠 Main Menu" or message.text == "🏠 MAIN MENU" or message.text == "🔙 Back to Main Menu")
+def main_menu_handler(message):
+    show_main_menu(bot, message.chat.id)
+
+
+# Profile Creation Bottom Buttons
+@bot.message_handler(func=lambda message: message.text in ["👨 Male", "👩 Female"])
+def gender_selection_handler(message):
+    handle_gender_callback(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text in ["👨 Male", "👩 Female", "👥 Both"])
+def preference_selection_handler(message):
+    # Check if in preference selection state
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    
+    if state == "awaiting_preference":
+        handle_preference_callback(bot, message, user_states, user_temp_data)
+    elif state == "awaiting_interest_change":
+        handle_update_preference(bot, message, user_states, user_temp_data)
+    else:
+        # For change interest menu
+        handle_update_preference(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text in ["✅ Confirm Profile", "❌ Cancel"])
+def confirm_profile_handler(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if state == "awaiting_confirm":
+        handle_confirm_callback(bot, message, user_states, user_temp_data)
+
+
+# Profile Viewing Bottom Buttons
+@bot.message_handler(func=lambda message: message.text == "❤️ LIKE")
+def like_action_handler(message):
+    handle_like_action(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "⏭️ SKIP")
+def skip_action_handler(message):
+    handle_skip_action(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "🛑 STOP VIEWING")
+def stop_viewing_handler(message):
+    handle_stop_viewing_action(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "💬 CHAT")
+def chat_from_profile_handler(message):
+    handle_chat_from_profile(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "🔄 Refresh")
+def refresh_profiles_handler(message):
+    handle_refresh_profiles(bot, message, user_states, user_temp_data)
+
+
+# Profile Edit Bottom Buttons
+@bot.message_handler(func=lambda message: message.text == "✏️ EDIT PROFILE")
+def edit_profile_handler(message):
+    handle_edit_profile(bot, message, user_states, user_temp_data)
+
+
+# Settings Bottom Buttons
+@bot.message_handler(func=lambda message: message.text == "🗑 Delete Account")
+def delete_account_handler(message):
+    handle_delete_account(bot, message)
+
+
+@bot.message_handler(func=lambda message: message.text == "🗑 Confirm Delete")
+def confirm_delete_handler(message):
+    handle_confirm_delete(bot, message)
+
+
+# Notification Action Bottom Buttons
+@bot.message_handler(func=lambda message: message.text.startswith("👤 View "))
+def view_user_from_notification(message):
+    handle_view_user_from_notification(bot, message, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text.startswith("❤️ Like "))
+def like_from_notification(message):
+    handle_like_from_notification(bot, message, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text.startswith("💬 Reply to "))
+def reply_from_notification(message):
+    handle_reply_from_notification(bot, message, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text.startswith("💬 Chat with "))
+def chat_from_notification(message):
+    handle_chat_from_notification(bot, message, user_temp_data)
+
+
+# Chat Bottom Buttons
+@bot.message_handler(func=lambda message: message.text == "❌ CANCEL CHAT")
+def cancel_chat_handler(message):
+    handle_cancel_chat(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "📜 VIEW HISTORY")
+def view_history_handler(message):
+    user_id = message.from_user.id
+    chat_session = None
+    # Find active chat session
+    from handlers.chat import active_chats
+    if user_id in active_chats:
+        chat_session = active_chats[user_id]
+    
+    if chat_session:
+        target_id = chat_session.get('target_id')
+        target_name = chat_session.get('target_name')
+        handle_get_conversation(bot, message, user_id, target_id, target_name)
+    else:
+        bot.reply_to(message, "❌ No active chat session!")
+
+
+@bot.message_handler(func=lambda message: message.text == "🔙 BACK TO CHAT")
+def back_to_chat_handler(message):
+    handle_back_to_chat(bot, message, user_states, user_temp_data)
+
+
+# ========== CALLBACK QUERY HANDLERS (for backward compatibility) ==========
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
+    """Handle callback queries for inline keyboards"""
     user_id = call.from_user.id
     data = call.data
     logger.info(f"Callback received: {data} from user {user_id}")
     
-    if data == "verify":
-        handle_verify_callback(bot, call, user_states, user_temp_data)
-    elif data == "continue_bot":
-        handle_continue_bot(bot, call, user_states, user_temp_data)
-    elif data == "create_profile":
-        handle_create_profile(bot, call, user_states, user_temp_data)
-    elif data.startswith("gender_"):
-        handle_gender_callback(bot, call, user_states, user_temp_data)
-    elif data.startswith("confirm_"):
-        handle_confirm_callback(bot, call, user_states, user_temp_data)
-    elif data.startswith("pref_"):
-        handle_preference_callback(bot, call, user_states, user_temp_data)
-    elif data == "view_profiles":
-        handle_view_profiles(bot, call, user_states, user_temp_data)
-    elif data.startswith("like_"):
-        handle_like_callback(bot, call, user_states, user_temp_data)
-    elif data == "skip_profile":
-        handle_skip_callback(bot, call, user_states, user_temp_data)
-    elif data == "stop_viewing":
-        handle_stop_callback(bot, call, user_states, user_temp_data)
-    elif data == "my_profile":
-        handle_my_profile(bot, call)
-    elif data == "edit_profile":
-        handle_edit_profile(bot, call, user_states, user_temp_data)
-    elif data == "notifications":
-        handle_notifications(bot, call)
-    elif data.startswith("chat_"):
+    if data.startswith("chat_"):
         handle_chat_callback(bot, call, user_states, user_temp_data)
-    elif data == "cancel_chat":
-        handle_cancel_chat(bot, call, user_states, user_temp_data)
-    elif data == "main_menu":
-        show_main_menu(bot, call.message.chat.id)
     else:
         bot.answer_callback_query(call.id, "Processing...", show_alert=False)
 
 
-# ========== MESSAGE HANDLERS ==========
+# ========== MESSAGE HANDLERS FOR PROFILE CREATION STATES ==========
 @bot.message_handler(func=lambda message: True, content_types=['text', 'photo', 'video', 'location'])
-def handle_messages(message):
+def handle_all_messages(message):
+    """Handle all messages based on user state"""
     user_id = message.from_user.id
     state = user_states.get(user_id)
-    logger.info(f"Message from user {user_id}, state: {state}")
     
+    logger.info(f"Message from user {user_id}, state: {state}, text: {getattr(message, 'text', 'media')}")
+    
+    # Handle location
     if message.location:
-        handle_location(bot, message, user_states, user_temp_data)
+        if state == "awaiting_location":
+            handle_location(bot, message, user_states, user_temp_data)
         return
     
+    # Handle media (photos/videos)
     if message.photo or message.video:
         if state == "awaiting_media":
             handle_media(bot, message, user_states, user_temp_data)
         elif state == "awaiting_chat_message":
             handle_chat_message(bot, message, user_states, user_temp_data)
         else:
-            bot.reply_to(message, "❌ Please use /start to begin.")
+            bot.reply_to(message, "❌ Please use /start to begin or use the buttons below.")
         return
     
+    # Handle text messages
     if message.text:
         text = message.text.strip()
+        
+        # Profile creation states
         if state == "awaiting_name":
             handle_name(bot, message, user_states, user_temp_data)
+        
         elif state == "awaiting_age":
             handle_age(bot, message, user_states, user_temp_data)
-        elif state == "awaiting_location_text":
+        
+        elif state == "awaiting_location":
             handle_location_text(bot, message, user_states, user_temp_data)
+        
         elif state == "awaiting_about":
             handle_about(bot, message, user_states, user_temp_data)
+        
         elif state == "awaiting_chat_message":
             handle_chat_message(bot, message, user_states, user_temp_data)
-        else:
-            bot.reply_to(message, "❌ Invalid command. Use /start to begin.")
+        
+        # Skip if state is not set - these are handled by specific handlers above
+        elif state is None:
+            # Check if it's a main menu button that wasn't caught
+            if text in ["👤 MY PROFILE", "👀 VIEW PROFILES", "🔔 NOTIFICATIONS", 
+                       "🎯 CHANGE INTEREST", "📊 MY STATS", "⚙️ SETTINGS",
+                       "🏠 Main Menu", "🏠 MAIN MENU", "🔙 Back to Main Menu"]:
+                # These should be caught by specific handlers, but just in case
+                pass
+            else:
+                bot.reply_to(message, "❌ Invalid command. Use /start to begin.")
     
+    # Update last activity
     try:
         db = get_db()
         db.get_collection("users").update_one(
@@ -177,13 +353,16 @@ def handle_messages(message):
         logger.error(f"Failed to update last_active: {e}")
 
 
+# ========== FALLBACK HANDLER ==========
 @bot.message_handler(func=lambda message: True)
 def fallback_handler(message):
-    bot.reply_to(message, "❌ I didn't understand that. Use /start to begin.")
+    """Fallback handler for any unhandled messages"""
+    bot.reply_to(message, "❌ I didn't understand that. Use /start to begin or use the buttons below.")
 
 
 # ========== MAIN FUNCTION ==========
 def main():
+    """Main function to run the bot"""
     # Start Flask in background thread for health check (Render Web Service requirement)
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
@@ -197,8 +376,8 @@ def main():
     except Exception as e:
         logger.error(f"Failed to get bot info: {e}")
     
+    # Clear webhook and start polling
     bot.delete_webhook()
-    bot.remove_webhook()
     time.sleep(1)
     
     logger.info("🔥 DEMON CORE ONLINE - Bot is polling...")
