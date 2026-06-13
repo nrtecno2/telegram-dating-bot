@@ -54,14 +54,11 @@ def handle_notifications(bot, message):
         if notif_type == 'like':
             text = f"❤️ **{from_name} liked your profile!**"
             
-            # Bottom buttons for like notification
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
             btn_view = types.KeyboardButton(f"👤 View {from_name}")
             btn_menu = types.KeyboardButton("🏠 Main Menu")
             markup.add(btn_view, btn_menu)
             
-            # Store context for this user
-            # We'll use user_temp_data to store which profile to view
             from handlers.start import user_temp_data
             user_temp_data[user_id] = {'view_user_id': from_user_id, 'view_user_name': from_name}
             
@@ -75,7 +72,6 @@ def handle_notifications(bot, message):
         elif notif_type == 'mutual_match':
             text = f"🎉 **Mutual Match!** {from_name} liked you back!"
             
-            # Bottom buttons for mutual match notification
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
             btn_view = types.KeyboardButton(f"👤 View {from_name}")
             btn_chat = types.KeyboardButton(f"💬 Chat with {from_name}")
@@ -96,7 +92,6 @@ def handle_notifications(bot, message):
             msg_preview = notif.get('message', '')[:100]
             text = f"💬 **{from_name} sent you a message:**\n\n_{msg_preview}_"
             
-            # Bottom buttons for message notification
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
             btn_reply = types.KeyboardButton(f"💬 Reply to {from_name}")
             btn_view = types.KeyboardButton(f"👤 View {from_name}")
@@ -127,7 +122,6 @@ def handle_notifications(bot, message):
                 parse_mode='Markdown'
             )
     
-    # If no specific notifications were shown, show main menu option
     if not notifications:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
         btn_menu = types.KeyboardButton("🏠 Main Menu")
@@ -139,6 +133,24 @@ def handle_notifications(bot, message):
             reply_markup=markup,
             parse_mode='Markdown'
         )
+
+
+def send_message_notification(bot, to_user_id, from_user_id, from_name, message_preview):
+    """Send message notification to user"""
+    try:
+        notification = {
+            "user_id": to_user_id,
+            "type": "message",
+            "from_user_id": from_user_id,
+            "from_name": from_name,
+            "message": message_preview[:100],
+            "is_read": False,
+            "created_at": datetime.utcnow()
+        }
+        db.get_collection("notifications").insert_one(notification)
+        logger.info(f"Message notification sent to {to_user_id} from {from_user_id}")
+    except Exception as e:
+        logger.error(f"Failed to send message notification: {e}")
 
 
 def handle_view_user_from_notification(bot, message, user_temp_data):
@@ -154,7 +166,6 @@ def handle_view_user_from_notification(bot, message, user_temp_data):
         show_main_menu(bot, message.chat.id)
         return
     
-    # Get target profile
     target_profile = db.get_collection("profiles").find_one({"user_id": target_id})
     if not target_profile:
         bot.reply_to(message, "❌ User profile not found!")
@@ -162,7 +173,6 @@ def handle_view_user_from_notification(bot, message, user_temp_data):
         show_main_menu(bot, message.chat.id)
         return
     
-    # Display profile
     text = f"👤 **{target_profile['name']}**\n"
     text += f"🎂 Age: {target_profile['age']}\n"
     text += f"📍 {target_profile.get('location_text', 'Location not specified')}\n"
@@ -170,17 +180,14 @@ def handle_view_user_from_notification(bot, message, user_temp_data):
     if target_profile.get('about'):
         text += f"\n📝 **About:**\n{target_profile['about'][:200]}\n"
     
-    # Bottom buttons
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_like = types.KeyboardButton(f"❤️ Like {target_profile['name']}")
     btn_chat = types.KeyboardButton(f"💬 Chat with {target_profile['name']}")
     btn_menu = types.KeyboardButton("🏠 Main Menu")
     markup.add(btn_like, btn_chat, btn_menu)
     
-    # Store for actions
     user_temp_data[user_id] = {'view_user_id': target_id, 'view_user_name': target_profile['name']}
     
-    # Send media if available
     media_list = target_profile.get('media', [])
     if media_list and len(media_list) > 0:
         try:
@@ -216,7 +223,6 @@ def handle_like_from_notification(bot, message, user_temp_data):
         show_main_menu(bot, message.chat.id)
         return
     
-    # Check if already liked
     existing_like = db.get_collection("likes").find_one({
         "from_user": user_id,
         "to_user": target_id
@@ -225,7 +231,6 @@ def handle_like_from_notification(bot, message, user_temp_data):
     if existing_like:
         bot.reply_to(message, f"❤️ You already liked {target_name}!")
     else:
-        # Create like
         like_data = {
             "from_user": user_id,
             "to_user": target_id,
@@ -237,7 +242,6 @@ def handle_like_from_notification(bot, message, user_temp_data):
         }
         db.get_collection("likes").insert_one(like_data)
         
-        # Create notification
         notification = {
             "user_id": target_id,
             "type": "like",
@@ -249,7 +253,6 @@ def handle_like_from_notification(bot, message, user_temp_data):
         }
         db.get_collection("notifications").insert_one(notification)
         
-        # Check for mutual
         mutual = db.get_collection("likes").find_one({
             "from_user": target_id,
             "to_user": user_id
@@ -296,7 +299,6 @@ def handle_reply_from_notification(bot, message, user_temp_data):
         show_main_menu(bot, message.chat.id)
         return
     
-    # Start chat session
     from handlers.chat import start_chat_session
     start_chat_session(bot, message, user_id, target_id, target_name)
 
@@ -314,6 +316,5 @@ def handle_chat_from_notification(bot, message, user_temp_data):
         show_main_menu(bot, message.chat.id)
         return
     
-    # Start chat session
     from handlers.chat import start_chat_session
     start_chat_session(bot, message, user_id, target_id, target_name)
