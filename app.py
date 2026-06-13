@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask
 import telebot
 from telebot import types
 from dotenv import load_dotenv
@@ -30,13 +30,17 @@ def run_flask():
 from database import get_db
 
 # Import handlers
-from handlers.start import handle_start, handle_channel_join, handle_verify_membership, start_profile_creation
+from handlers.start import handle_start, handle_channel_join, handle_verify_membership
 from handlers.profile import (
     handle_name, handle_gender_callback, handle_age, handle_location,
     handle_location_text, handle_about, handle_media, handle_confirm_callback,
-    handle_preference_callback, show_main_menu, handle_edit_profile,
-    handle_change_interest, handle_update_preference, handle_my_stats,
-    handle_settings, handle_delete_account, handle_confirm_delete
+    handle_preference_callback, show_main_menu, 
+    handle_edit_profile, handle_edit_name, process_edit_name,
+    handle_edit_age, process_edit_age, handle_edit_gender, process_edit_gender,
+    handle_edit_location, process_edit_location, handle_edit_about, process_edit_about,
+    handle_edit_media, process_edit_media, save_edited_profile, cancel_edit,
+    handle_change_interest, handle_update_preference,
+    handle_my_stats, handle_settings, handle_delete_account, handle_confirm_delete
 )
 from handlers.view_profiles import (
     handle_view_profiles, handle_like_action, handle_skip_action,
@@ -46,7 +50,7 @@ from handlers.view_profiles import (
 from handlers.notifications import (
     handle_notifications, handle_view_user_from_notification,
     handle_like_from_notification, handle_reply_from_notification,
-    handle_chat_from_notification
+    handle_chat_from_notification, send_message_notification
 )
 from handlers.chat import (
     start_chat_session, handle_chat_message, handle_cancel_chat,
@@ -104,12 +108,14 @@ def done_command(message):
 
 
 # ========== BOTTOM BUTTON HANDLERS (ReplyKeyboardMarkup) ==========
+
+# Channel verification buttons
 @bot.message_handler(func=lambda message: message.text == "📢 JOIN CHANNEL")
 def channel_join_handler(message):
     handle_channel_join(bot, message, user_temp_data)
 
 
-@bot.message_handler(func=lambda message: message.text == "✅ VERIFY MEMBERSHIP" or message.text == "🔄 VERIFY AGAIN")
+@bot.message_handler(func=lambda message: message.text in ["✅ VERIFY MEMBERSHIP", "🔄 VERIFY AGAIN"])
 def verify_membership_handler(message):
     handle_verify_membership(bot, message, user_states, user_temp_data)
 
@@ -145,7 +151,7 @@ def settings_handler(message):
     handle_settings(bot, message)
 
 
-@bot.message_handler(func=lambda message: message.text == "🏠 Main Menu" or message.text == "🏠 MAIN MENU" or message.text == "🔙 Back to Main Menu")
+@bot.message_handler(func=lambda message: message.text in ["🏠 Main Menu", "🏠 MAIN MENU", "🔙 Back to Main Menu"])
 def main_menu_handler(message):
     show_main_menu(bot, message.chat.id)
 
@@ -153,21 +159,22 @@ def main_menu_handler(message):
 # Profile Creation Bottom Buttons
 @bot.message_handler(func=lambda message: message.text in ["👨 Male", "👩 Female"])
 def gender_selection_handler(message):
-    handle_gender_callback(bot, message, user_states, user_temp_data)
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if state == "awaiting_gender":
+        handle_gender_callback(bot, message, user_states, user_temp_data)
+    elif state == "editing_profile":
+        process_edit_gender(bot, message, user_states, user_temp_data)
 
 
 @bot.message_handler(func=lambda message: message.text in ["👨 Male", "👩 Female", "👥 Both"])
 def preference_selection_handler(message):
-    # Check if in preference selection state
     user_id = message.from_user.id
     state = user_states.get(user_id)
     
     if state == "awaiting_preference":
         handle_preference_callback(bot, message, user_states, user_temp_data)
     elif state == "awaiting_interest_change":
-        handle_update_preference(bot, message, user_states, user_temp_data)
-    else:
-        # For change interest menu
         handle_update_preference(bot, message, user_states, user_temp_data)
 
 
@@ -209,6 +216,51 @@ def refresh_profiles_handler(message):
 @bot.message_handler(func=lambda message: message.text == "✏️ EDIT PROFILE")
 def edit_profile_handler(message):
     handle_edit_profile(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit Name")
+def edit_name_handler(message):
+    handle_edit_name(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit Age")
+def edit_age_handler(message):
+    handle_edit_age(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit Gender")
+def edit_gender_handler(message):
+    handle_edit_gender(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit Location")
+def edit_location_handler(message):
+    handle_edit_location(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit About")
+def edit_about_handler(message):
+    handle_edit_about(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "✏️ Edit Photos/Videos")
+def edit_media_handler(message):
+    handle_edit_media(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "💾 Save All Changes")
+def save_edit_handler(message):
+    save_edited_profile(bot, message, user_states, user_temp_data)
+
+
+@bot.message_handler(func=lambda message: message.text == "❌ Cancel")
+def cancel_edit_handler(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if state in ["editing_profile", "editing_name", "editing_age", "editing_gender", "editing_location", "editing_about", "editing_media"]:
+        cancel_edit(bot, message, user_states, user_temp_data)
+    else:
+        cancel_command(message)
 
 
 # Settings Bottom Buttons
@@ -253,7 +305,6 @@ def cancel_chat_handler(message):
 def view_history_handler(message):
     user_id = message.from_user.id
     chat_session = None
-    # Find active chat session
     from handlers.chat import active_chats
     if user_id in active_chats:
         chat_session = active_chats[user_id]
@@ -292,7 +343,7 @@ def handle_all_messages(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
     
-    logger.info(f"Message from user {user_id}, state: {state}, text: {getattr(message, 'text', 'media')}")
+    logger.info(f"Message from user {user_id}, state: {state}")
     
     # Handle location
     if message.location:
@@ -306,6 +357,8 @@ def handle_all_messages(message):
             handle_media(bot, message, user_states, user_temp_data)
         elif state == "awaiting_chat_message":
             handle_chat_message(bot, message, user_states, user_temp_data)
+        elif state == "editing_media":
+            process_edit_media(bot, message, user_states, user_temp_data)
         else:
             bot.reply_to(message, "❌ Please use /start to begin or use the buttons below.")
         return
@@ -330,13 +383,25 @@ def handle_all_messages(message):
         elif state == "awaiting_chat_message":
             handle_chat_message(bot, message, user_states, user_temp_data)
         
+        # Edit profile states
+        elif state == "editing_name":
+            process_edit_name(bot, message, user_states, user_temp_data)
+        
+        elif state == "editing_age":
+            process_edit_age(bot, message, user_states, user_temp_data)
+        
+        elif state == "editing_location":
+            process_edit_location(bot, message, user_states, user_temp_data)
+        
+        elif state == "editing_about":
+            process_edit_about(bot, message, user_states, user_temp_data)
+        
         # Skip if state is not set - these are handled by specific handlers above
         elif state is None:
             # Check if it's a main menu button that wasn't caught
             if text in ["👤 MY PROFILE", "👀 VIEW PROFILES", "🔔 NOTIFICATIONS", 
                        "🎯 CHANGE INTEREST", "📊 MY STATS", "⚙️ SETTINGS",
                        "🏠 Main Menu", "🏠 MAIN MENU", "🔙 Back to Main Menu"]:
-                # These should be caught by specific handlers, but just in case
                 pass
             else:
                 bot.reply_to(message, "❌ Invalid command. Use /start to begin.")
