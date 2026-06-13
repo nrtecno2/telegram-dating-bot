@@ -30,7 +30,7 @@ def run_flask():
 from database import get_db
 
 # Handlers
-from handlers.start import handle_start, handle_join_channel, handle_verify_membership
+from handlers.start import handle_start, handle_join_channel, handle_verify
 from handlers.profile import (
     handle_name, handle_gender_callback, handle_age, handle_location,
     handle_location_text, handle_about, handle_media, confirm_profile,
