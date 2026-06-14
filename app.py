@@ -35,7 +35,7 @@ client = MongoClient(MONGO_URI)
 db = client.get_database("dating_bot")
 
 # ---------- Private Channel for Media ----------
-PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")  # e.g., -1001234567890
+PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")
 if not PRIVATE_CHANNEL_ID:
     logger.warning("PRIVATE_CHANNEL_ID not set. Media will not be stored permanently.")
 
@@ -49,11 +49,12 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
 # ---------- User Stores ----------
 user_states = {}
 user_temp_data = {}
+swipe_sessions = {}
 
 # ---------- Helper: Upload media to private channel ----------
 def upload_media_to_channel(file_id, user_id, media_type):
     if not PRIVATE_CHANNEL_ID:
-        return file_id  # fallback to file_id if no channel
+        return file_id
     try:
         if media_type == 'photo':
             msg = bot.send_photo(PRIVATE_CHANNEL_ID, file_id, caption=f"User: {user_id}")
@@ -62,7 +63,7 @@ def upload_media_to_channel(file_id, user_id, media_type):
         return f"https://t.me/c/{str(PRIVATE_CHANNEL_ID)[4:]}/{msg.message_id}"
     except Exception as e:
         logger.error(f"Upload failed: {e}")
-        return file_id  # fallback
+        return file_id
 
 # ---------- Helper: Show Main Menu ----------
 def show_main_menu(chat_id):
@@ -77,10 +78,16 @@ def show_main_menu(chat_id):
     )
     bot.send_message(chat_id, "🏠 **Main Menu**\nChoose an option:", reply_markup=markup)
 
-# ---------- /start ----------
+# ---------- /start (fix: check existing profile) ----------
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
+    # Check if profile already exists and is active
+    existing = db.profiles.find_one({"user_id": user_id, "is_active": True})
+    if existing:
+        show_main_menu(message.chat.id)
+        return
+    # New profile creation
     user_states[user_id] = "awaiting_name"
     user_temp_data[user_id] = {}
     bot.reply_to(message, "🌟 Let's create your profile!\nSend your **Name** (2-50 chars):", reply_markup=types.ReplyKeyboardRemove())
@@ -162,7 +169,7 @@ def location_text(m):
     user_states[uid] = "awaiting_about"
     bot.reply_to(m, f"✅ Location: {text}\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
 
-# ---------- About (with Skip button via keyboard, no /skip command) ----------
+# ---------- About (with button layout, no /skip command) ----------
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_about")
 def process_about(m):
     uid = m.from_user.id
@@ -173,7 +180,7 @@ def process_about(m):
     user_temp_data[uid]['about'] = about
     user_states[uid] = "awaiting_media"
     user_temp_data[uid]['media_list'] = []
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("📷 Done (Finish Media)"))
     bot.reply_to(m, "About saved.\nSend **1-3 photos/videos**, then tap 'Done (Finish Media)':", reply_markup=markup)
 
@@ -219,8 +226,10 @@ def done_media(m):
     preview_text += f"📝 About: {temp.get('about', 'Not provided')[:100]}\n"
     preview_text += f"📷 Media: {len(media_list)} file(s)\n\nConfirm to save?"
 
+    # Buttons: fixed text with emoji to match handler
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("✅ CONFIRM"), types.KeyboardButton("❌ CANCEL"))
+
     # Send first media with caption
     first = media_list[0]
     try:
@@ -230,7 +239,7 @@ def done_media(m):
             bot.send_video(m.chat.id, first['file_id'], caption=preview_text, parse_mode='Markdown', reply_markup=markup)
     except:
         bot.reply_to(m, preview_text, reply_markup=markup)
-    # Send remaining media (without caption)
+    # Send remaining media
     for media in media_list[1:]:
         try:
             if media['type'] == 'photo':
@@ -241,13 +250,13 @@ def done_media(m):
             pass
     user_states[uid] = "awaiting_confirm"
 
-# ---------- Confirm / Cancel ----------
+# ---------- Confirm / Cancel (fix: match button text) ----------
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "✅ CONFIRM")
 def confirm_profile(m):
     uid = m.from_user.id
     temp = user_temp_data.pop(uid, {})
     user_states.pop(uid, None)
-    # Upload media to private channel and get URLs
+    # Upload media to private channel
     media_urls = []
     for media in temp.get('media_list', []):
         url = upload_media_to_channel(media['file_id'], uid, media['type'])
@@ -299,7 +308,7 @@ def set_preference(m):
     bot.reply_to(m, f"✅ Preference set to {text}.", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(m.chat.id)
 
-# ---------- MY PROFILE ----------
+# ---------- MY PROFILE (fetch real data from DB) ----------
 @bot.message_handler(func=lambda m: m.text == "👤 MY PROFILE")
 def my_profile(m):
     uid = m.from_user.id
@@ -331,8 +340,6 @@ def my_profile(m):
     show_main_menu(m.chat.id)
 
 # ---------- VIEW PROFILES (swiping) ----------
-swipe_sessions = {}
-
 @bot.message_handler(func=lambda m: m.text == "👀 VIEW PROFILES")
 def view_profiles(m):
     uid = m.from_user.id
@@ -431,8 +438,8 @@ def stop_viewing(m):
 
 @bot.message_handler(func=lambda m: m.text == "💬 CHAT")
 def chat_placeholder(m):
-    # For mutual match check – simplified
-    bot.reply_to(m, "Chat feature: only for mutual matches. Coming soon in next update.")
+    # For mutual match only – will implement fully later
+    bot.reply_to(m, "Chat feature: only for mutual matches. Coming soon.")
     show_main_menu(m.chat.id)
 
 # ---------- CHANGE INTEREST ----------
