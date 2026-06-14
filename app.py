@@ -222,7 +222,7 @@ def done_media(m):
     preview += f"📝 About: {temp.get('about', 'Not provided')[:100]}\n"
     preview += f"📷 Media: {len(media_list)} file(s)\n\nConfirm to save?"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(types.KeyboardButton("✅ CONFIRM"), types.KeyboardButton("❌ CANCEL"))
+    markup.add(types.KeyboardButton("CONFIRM"), types.KeyboardButton("CANCEL"))
     first = media_list[0]
     try:
         if first['type'] == 'photo':
@@ -242,7 +242,7 @@ def done_media(m):
     user_states[uid] = "awaiting_confirm"
 
 # ---------- Confirm / Cancel ----------
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "✅ CONFIRM")
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CONFIRM")
 def confirm_profile(m):
     uid = m.from_user.id
     temp = user_temp_data.pop(uid, {})
@@ -251,13 +251,18 @@ def confirm_profile(m):
     for media in temp.get('media_list', []):
         url = upload_media_to_channel(media['file_id'], uid, media['type'])
         media_urls.append(url)
+    # Avoid empty string for location
+    loc = temp.get('location')
+    if not loc or loc == "":
+        loc = None
     profile = {
         "user_id": uid,
         "username": m.from_user.username,
         "name": temp.get('name'),
         "gender": temp.get('gender'),
         "age": temp.get('age'),
-        "location": temp.get('location', ''),
+        "location": loc,
+        "location_text": temp.get('location', ''),
         "about": temp.get('about', ''),
         "media": media_urls,
         "created_at": datetime.utcnow(),
@@ -272,7 +277,7 @@ def confirm_profile(m):
     user_states[uid] = "awaiting_preference"
     bot.reply_to(m, "Who do you want to see in your feed?", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "❌ CANCEL")
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CANCEL")
 def cancel_profile(m):
     uid = m.from_user.id
     user_states.pop(uid, None)
@@ -298,16 +303,17 @@ def set_preference(m):
     bot.reply_to(m, f"✅ Preference set to {text}.", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(m.chat.id)
 
-# ---------- MY PROFILE ----------
+# ---------- MY PROFILE (with Edit button) ----------
 @bot.message_handler(func=lambda m: m.text == "👤 MY PROFILE")
 def my_profile(m):
     uid = m.from_user.id
     profile = db.profiles.find_one({"user_id": uid, "is_active": True})
     if not profile:
-        bot.reply_to(m, "❌ No profile found. Use /start.")
+        bot.reply_to(m, "❌ No profile found. Use /start to create one.")
         show_main_menu(m.chat.id)
         return
     text = f"👤 **YOUR PROFILE**\n\n📛 Name: {profile.get('name')}\n⚧ Gender: {'Male' if profile.get('gender')=='male' else 'Female'}\n🎂 Age: {profile.get('age')}\n📍 Location: {profile.get('location', 'Not set')}\n📝 About: {profile.get('about', 'Not set')[:200]}\n📷 Media: {len(profile.get('media', []))} file(s)"
+    
     media_list = profile.get('media', [])
     if media_list:
         try:
@@ -321,6 +327,20 @@ def my_profile(m):
                 pass
     else:
         bot.reply_to(m, text, parse_mode='Markdown')
+    
+    # ✅ Edit profile + Main menu buttons
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(types.KeyboardButton("✏️ EDIT PROFILE"), types.KeyboardButton("🏠 MAIN MENU"))
+    bot.send_message(m.chat.id, "What would you like to do?", reply_markup=markup)
+
+# ---------- Edit Profile placeholder ----------
+@bot.message_handler(func=lambda m: m.text == "✏️ EDIT PROFILE")
+def edit_profile_start(m):
+    bot.reply_to(m, "✏️ Edit profile feature coming soon.\nYou can delete and recreate for now.", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(m.chat.id)
+
+@bot.message_handler(func=lambda m: m.text == "🏠 MAIN MENU")
+def back_to_main(m):
     show_main_menu(m.chat.id)
 
 # ---------- VIEW PROFILES (Swiping) ----------
@@ -343,7 +363,7 @@ def view_profiles(m):
     query["user_id"] = {"$nin": liked}
     profiles = list(db.profiles.find(query).limit(50))
     if not profiles:
-        bot.reply_to(m, "😔 No profiles found. Try changing preference.")
+        bot.reply_to(m, "😔 No profiles found. Try changing your preference.")
         show_main_menu(m.chat.id)
         return
     swipe_sessions[uid] = {"profiles": profiles, "index": 0}
@@ -378,17 +398,22 @@ def send_profile(chat_id, uid):
         bot.send_message(chat_id, text, reply_markup=markup)
     session["current_profile_id"] = p["user_id"]
 
+# ---------- LIKE (fixed: moves to next profile) ----------
 @bot.message_handler(func=lambda m: m.text == "❤️ LIKE")
 def like_profile(m):
     uid = m.from_user.id
     session = swipe_sessions.get(uid)
     if not session:
-        bot.reply_to(m, "No active swipe session.")
+        bot.reply_to(m, "No active swipe session. Use VIEW PROFILES.")
         return
     target_id = session.get("current_profile_id")
     if not target_id:
         return
-    db.likes.update_one({"from_user": uid, "to_user": target_id}, {"$set": {"created_at": datetime.utcnow()}}, upsert=True)
+    db.likes.update_one(
+        {"from_user": uid, "to_user": target_id},
+        {"$set": {"created_at": datetime.utcnow()}},
+        upsert=True
+    )
     mutual = db.likes.find_one({"from_user": target_id, "to_user": uid})
     if mutual:
         db.likes.update_many(
@@ -398,6 +423,7 @@ def like_profile(m):
         bot.reply_to(m, "🎉 It's a match! You can now chat.")
     else:
         bot.reply_to(m, "❤️ Liked!")
+    # ✅ Move to next profile immediately
     session["index"] += 1
     send_profile(m.chat.id, uid)
 
