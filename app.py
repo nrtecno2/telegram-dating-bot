@@ -303,7 +303,7 @@ def set_preference(m):
     bot.reply_to(m, f"✅ Preference set to {text}.", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(m.chat.id)
 
-# ---------- MY PROFILE (with working Edit Profile) ----------
+# ---------- MY PROFILE (with Edit button) ----------
 @bot.message_handler(func=lambda m: m.text == "👤 MY PROFILE")
 def my_profile(m):
     uid = m.from_user.id
@@ -643,16 +643,21 @@ def receive_chat_message(m):
     except Exception as e:
         bot.reply_to(m, f"❌ Could not deliver message: {e}")
 
-# ---------- SKIP and STOP ----------
+# ---------- SKIP (fixed: no message forwarding) ----------
 @bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
 def skip_profile(m):
     uid = m.from_user.id
+    # Agar user chat mode me ho, to forcibly exit
+    if user_states.get(uid) == "awaiting_chat_message":
+        user_states.pop(uid, None)
+        user_temp_data.pop(uid, None)
     session = swipe_sessions.get(uid)
     if not session:
         return
     session["index"] += 1
     send_profile(m.chat.id, uid)
 
+# ---------- STOP ----------
 @bot.message_handler(func=lambda m: m.text == "🛑 STOP VIEWING")
 def stop_viewing(m):
     uid = m.from_user.id
