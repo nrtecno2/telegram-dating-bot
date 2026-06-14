@@ -3,6 +3,7 @@ import os
 import logging
 import threading
 import time
+import random
 from datetime import datetime
 from flask import Flask
 import telebot
@@ -203,7 +204,7 @@ def collect_media(m):
     remaining = 3 - len(media_list)
     bot.reply_to(m, f"✅ Media {len(media_list)}/3 added. {remaining} remaining. Send more or tap 'Done'.")
 
-# ---------- Done button ----------
+# ---------- Done button (preview) ----------
 @bot.message_handler(func=lambda m: m.text == "📷 Done (Finish Media)")
 def done_media(m):
     uid = m.from_user.id
@@ -308,7 +309,7 @@ def my_profile(m):
     uid = m.from_user.id
     profile = db.profiles.find_one({"user_id": uid, "is_active": True})
     if not profile:
-        bot.reply_to(m, "❌ No profile found. Use /start.")
+        bot.reply_to(m, "❌ No profile found. Use /start to create one.")
         show_main_menu(m.chat.id)
         return
     text = f"👤 **YOUR PROFILE**\n\n📛 Name: {profile.get('name')}\n⚧ Gender: {'Male' if profile.get('gender')=='male' else 'Female'}\n🎂 Age: {profile.get('age')}\n📍 Location: {profile.get('location_text', 'Not set')}\n📝 About: {profile.get('about', 'Not set')[:200]}\n📷 Media: {len(profile.get('media', []))} file(s)"
@@ -332,7 +333,7 @@ def my_profile(m):
     markup.add(types.KeyboardButton("✏️ EDIT PROFILE"), types.KeyboardButton("🏠 MAIN MENU"))
     bot.send_message(m.chat.id, "What would you like to do?", reply_markup=markup)
 
-# ---------- EDIT PROFILE - full working implementation ----------
+# ---------- EDIT PROFILE helpers ----------
 def edit_send_current(chat_id, uid, edit_step):
     profile = db.profiles.find_one({"user_id": uid, "is_active": True})
     if not profile:
@@ -519,7 +520,6 @@ def edit_media_done(m):
         user_states.pop(uid, None)
         show_main_menu(m.chat.id)
         return
-    # Upload new media to channel
     media_urls = []
     for media in media_list:
         url = upload_media_to_channel(media['file_id'], uid, media['type'])
@@ -537,7 +537,7 @@ def edit_media_skip(m):
     bot.reply_to(m, "✅ Media kept.")
     show_main_menu(m.chat.id)
 
-# ---------- VIEW PROFILES with loop (no main menu interruption) ----------
+# ---------- VIEW PROFILES (all active profiles, loop, no like filter) ----------
 @bot.message_handler(func=lambda m: m.text == "👀 VIEW PROFILES")
 def view_profiles(m):
     uid = m.from_user.id
@@ -546,21 +546,25 @@ def view_profiles(m):
         bot.reply_to(m, "❌ Create profile first using /start.")
         show_main_menu(m.chat.id)
         return
+    
     user = db.users.find_one({"user_id": uid})
     pref = user.get("preference", "both") if user else "both"
+    
     query = {"user_id": {"$ne": uid}, "is_active": True}
     if pref == "male":
         query["gender"] = "male"
     elif pref == "female":
         query["gender"] = "female"
-    liked = db.likes.distinct("to_user", {"from_user": uid})
-    query["user_id"] = {"$nin": liked}
-    profiles = list(db.profiles.find(query).limit(100))
+    
+    # No like filter – show all active profiles
+    profiles = list(db.profiles.find(query).limit(200))
+    
     if not profiles:
-        bot.reply_to(m, "😔 No profiles found. Try changing your preference.")
+        bot.reply_to(m, "😔 No other active profiles found. Ask friends to join!")
         show_main_menu(m.chat.id)
         return
-    # Store session and start
+    
+    random.shuffle(profiles)
     swipe_sessions[uid] = {"profiles": profiles, "index": 0}
     send_profile(m.chat.id, uid)
 
@@ -570,21 +574,17 @@ def send_profile(chat_id, uid):
         return
     idx = session["index"]
     profiles = session["profiles"]
+    
     if idx >= len(profiles):
-        # Loop back to start
-        session["index"] = 0
         idx = 0
-        if len(profiles) == 0:
-            bot.send_message(chat_id, "🏁 No profiles available.")
-            show_main_menu(chat_id)
-            return
+        session["index"] = 0
+    
     p = profiles[idx]
     text = f"👤 {p.get('name')}\n🎂 Age: {p.get('age')}\n📍 {p.get('location_text', 'No location')}\n📝 {p.get('about', '')[:100]}"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     markup.add(
-        types.KeyboardButton("❤️ LIKE"),
-        types.KeyboardButton("⏭️ SKIP"),
         types.KeyboardButton("💬 CHAT"),
+        types.KeyboardButton("⏭️ SKIP"),
         types.KeyboardButton("🛑 STOP VIEWING")
     )
     media = p.get('media', [])
@@ -597,34 +597,53 @@ def send_profile(chat_id, uid):
         bot.send_message(chat_id, text, reply_markup=markup)
     session["current_profile_id"] = p["user_id"]
 
-@bot.message_handler(func=lambda m: m.text == "❤️ LIKE")
-def like_profile(m):
+# ---------- CHAT (direct, no like required) ----------
+@bot.message_handler(func=lambda m: m.text == "💬 CHAT")
+def chat_handler(m):
     uid = m.from_user.id
     session = swipe_sessions.get(uid)
     if not session:
-        bot.reply_to(m, "No active swipe session. Use VIEW PROFILES.")
+        bot.reply_to(m, "❌ No active swipe session. Use VIEW PROFILES.")
         return
     target_id = session.get("current_profile_id")
     if not target_id:
+        bot.reply_to(m, "❌ Profile not found.")
         return
-    db.likes.update_one(
-        {"from_user": uid, "to_user": target_id},
-        {"$set": {"created_at": datetime.utcnow()}},
-        upsert=True
-    )
-    mutual = db.likes.find_one({"from_user": target_id, "to_user": uid})
-    if mutual:
-        db.likes.update_many(
-            {"$or": [{"from_user": uid, "to_user": target_id}, {"from_user": target_id, "to_user": uid}]},
-            {"$set": {"is_mutual": True}}
-        )
-        bot.reply_to(m, "🎉 It's a match! You can now chat.")
-    else:
-        bot.reply_to(m, "❤️ Liked!")
-    # Move to next profile
-    session["index"] += 1
-    send_profile(m.chat.id, uid)
+    
+    target_profile = db.profiles.find_one({"user_id": target_id, "is_active": True})
+    if not target_profile:
+        bot.reply_to(m, "❌ Target profile not active.")
+        return
+    
+    target_name = target_profile.get('name', 'User')
+    user_temp_data[uid] = {"chat_target": target_id, "chat_target_name": target_name}
+    bot.reply_to(m, f"💬 You can now message {target_name}. Send your message (text/photo/video):")
+    user_states[uid] = "awaiting_chat_message"
 
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_chat_message", content_types=['text', 'photo', 'video'])
+def receive_chat_message(m):
+    uid = m.from_user.id
+    target_info = user_temp_data.get(uid, {})
+    target_id = target_info.get("chat_target")
+    target_name = target_info.get("chat_target_name")
+    if not target_id:
+        bot.reply_to(m, "❌ Chat session expired. Use VIEW PROFILES again.")
+        user_states.pop(uid, None)
+        return
+    
+    # Forward message to target
+    try:
+        if m.text:
+            bot.send_message(target_id, f"💬 Message from {m.from_user.first_name}:\n{m.text}")
+        elif m.photo:
+            bot.send_photo(target_id, m.photo[-1].file_id, caption=f"📸 Photo from {m.from_user.first_name}")
+        elif m.video:
+            bot.send_video(target_id, m.video.file_id, caption=f"🎥 Video from {m.from_user.first_name}")
+        bot.reply_to(m, f"✅ Message sent to {target_name}.")
+    except Exception as e:
+        bot.reply_to(m, f"❌ Could not deliver message: {e}")
+
+# ---------- SKIP and STOP ----------
 @bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
 def skip_profile(m):
     uid = m.from_user.id
@@ -638,11 +657,6 @@ def skip_profile(m):
 def stop_viewing(m):
     uid = m.from_user.id
     swipe_sessions.pop(uid, None)
-    show_main_menu(m.chat.id)
-
-@bot.message_handler(func=lambda m: m.text == "💬 CHAT")
-def chat_placeholder(m):
-    bot.reply_to(m, "Chat feature: only for mutual matches. Coming soon.")
     show_main_menu(m.chat.id)
 
 # ---------- CHANGE INTEREST ----------
