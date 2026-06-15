@@ -13,7 +13,7 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-# Flask health check
+# ---------- Flask health check ----------
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -24,31 +24,34 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False)
 
+# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# MongoDB
+# ---------- MongoDB ----------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("MONGO_URI missing")
 client = MongoClient(MONGO_URI)
 db = client.get_database("dating_bot")
 
+# ---------- Private channel for media ----------
 PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")
 if not PRIVATE_CHANNEL_ID:
-    logger.warning("PRIVATE_CHANNEL_ID not set")
+    logger.warning("PRIVATE_CHANNEL_ID not set. Media will not be stored permanently.")
 
-# Bot
+# ---------- Bot ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing")
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
 
-# Stores
+# ---------- In-memory stores ----------
 user_states = {}
 user_temp_data = {}
 swipe_sessions = {}
 
+# ---------- Helper: upload media to private channel ----------
 def upload_media_to_channel(file_id, user_id, media_type):
     if not PRIVATE_CHANNEL_ID:
         return file_id
@@ -62,6 +65,7 @@ def upload_media_to_channel(file_id, user_id, media_type):
         logger.error(f"Upload failed: {e}")
         return file_id
 
+# ---------- Main menu (bottom buttons) ----------
 def show_main_menu(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
@@ -74,134 +78,153 @@ def show_main_menu(chat_id):
     )
     bot.send_message(chat_id, "🏠 **Main Menu**\nChoose an option:", reply_markup=markup)
 
-# ------------------------- /start -------------------------
+# ---------- /start ----------
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    user_id = message.from_user.id
-    existing = db.profiles.find_one({"user_id": user_id, "is_active": True})
+    chat_id = message.chat.id
+    existing = db.profiles.find_one({"user_id": chat_id, "is_active": True})
     if existing:
-        show_main_menu(message.chat.id)
+        show_main_menu(chat_id)
         return
-    user_states[user_id] = "awaiting_name"
-    user_temp_data[user_id] = {}
+    user_states[chat_id] = "awaiting_name"
+    user_temp_data[chat_id] = {}
     bot.reply_to(message, "🌟 Let's create your profile!\nSend your **Name** (2-50 chars):", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_name")
-def process_name(m):
-    uid = m.from_user.id
-    name = m.text.strip()
+# ---------- Name ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_name")
+def process_name(message):
+    chat_id = message.chat.id
+    name = message.text.strip()
     if len(name) < 2 or len(name) > 50:
-        bot.reply_to(m, "❌ Name must be 2-50 chars. Try again.")
+        bot.reply_to(message, "❌ Name must be 2-50 chars. Try again.")
         return
-    user_temp_data[uid]['name'] = name
-    user_states[uid] = "awaiting_gender"
+    user_temp_data[chat_id]['name'] = name
+    user_states[chat_id] = "awaiting_gender"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
-    bot.reply_to(m, f"✅ Name: {name}\n\nSelect your Gender:", reply_markup=markup)
+    bot.reply_to(message, f"✅ Name: {name}\n\nSelect your Gender:", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_gender")
-def process_gender(m):
-    uid = m.from_user.id
-    text = m.text.strip()
+# ---------- Gender ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_gender")
+def process_gender(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
     if text == "👨 Male":
         gender = "male"
     elif text == "👩 Female":
         gender = "female"
     else:
-        bot.reply_to(m, "❌ Please tap Male or Female button.")
+        bot.reply_to(message, "❌ Please tap Male or Female button.")
         return
-    user_temp_data[uid]['gender'] = gender
-    user_states[uid] = "awaiting_age"
-    bot.reply_to(m, f"✅ Gender: {text.replace('👨 ', '').replace('👩 ', '')}\n\nSend your **Age** (18-100):", reply_markup=types.ReplyKeyboardRemove())
+    user_temp_data[chat_id]['gender'] = gender
+    user_states[chat_id] = "awaiting_age"
+    bot.reply_to(message, f"✅ Gender: {text.replace('👨 ', '').replace('👩 ', '')}\n\nSend your **Age** (18-100):", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_age")
-def process_age(m):
-    uid = m.from_user.id
+# ---------- Age ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_age")
+def process_age(message):
+    chat_id = message.chat.id
     try:
-        age = int(m.text.strip())
+        age = int(message.text.strip())
         if age < 18 or age > 100:
             raise ValueError
     except:
-        bot.reply_to(m, "❌ Invalid age. Send 18-100.")
+        bot.reply_to(message, "❌ Invalid age. Send number between 18-100.")
         return
-    user_temp_data[uid]['age'] = age
-    user_states[uid] = "awaiting_location"
+    user_temp_data[chat_id]['age'] = age
+    user_states[chat_id] = "awaiting_location"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("📍 Send Location", request_location=True))
     markup.add(types.KeyboardButton("⏭️ Skip Location"))
-    bot.reply_to(m, f"✅ Age: {age}\n\nShare location or type city (or tap Skip):", reply_markup=markup)
+    bot.reply_to(message, f"✅ Age: {age}\n\nShare location or type city name (or tap Skip):", reply_markup=markup)
 
+# ---------- Location (live) ----------
 @bot.message_handler(content_types=['location'])
-def location_live(m):
-    uid = m.from_user.id
-    if user_states.get(uid) != "awaiting_location":
+def location_live(message):
+    chat_id = message.chat.id
+    if user_states.get(chat_id) != "awaiting_location":
         return
-    user_temp_data[uid]['location'] = f"{m.location.latitude},{m.location.longitude}"
-    user_states[uid] = "awaiting_about"
-    bot.reply_to(m, "✅ Location saved!\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
+    lat = message.location.latitude
+    lon = message.location.longitude
+    user_temp_data[chat_id]['location'] = f"{lat},{lon}"
+    user_states[chat_id] = "awaiting_about"
+    bot.reply_to(message, "✅ Location saved!\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_location")
-def location_text(m):
-    uid = m.from_user.id
-    text = m.text.strip()
+# ---------- Location (text or skip) ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_location")
+def location_text(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
     if text == "⏭️ Skip Location":
-        user_temp_data[uid]['location'] = ""
-        user_states[uid] = "awaiting_about"
-        bot.reply_to(m, "✅ Location skipped.\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
+        user_temp_data[chat_id]['location'] = ""
+        user_states[chat_id] = "awaiting_about"
+        bot.reply_to(message, "✅ Location skipped.\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
         return
     if len(text) < 2:
-        bot.reply_to(m, "❌ Invalid location. Type city name or tap Skip.")
+        bot.reply_to(message, "❌ Invalid location. Type city name or tap Skip.")
         return
-    user_temp_data[uid]['location'] = text
-    user_states[uid] = "awaiting_about"
-    bot.reply_to(m, f"✅ Location: {text}\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
+    user_temp_data[chat_id]['location'] = text
+    user_states[chat_id] = "awaiting_about"
+    bot.reply_to(message, f"✅ Location: {text}\n\nSend your **About** (max 500 chars):", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_about")
-def process_about(m):
-    uid = m.from_user.id
-    about = m.text.strip()
+# ---------- About ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_about")
+def process_about(message):
+    chat_id = message.chat.id
+    about = message.text.strip()
     if len(about) > 500:
-        bot.reply_to(m, "❌ Too long. Max 500 chars.")
+        bot.reply_to(message, "❌ Too long. Max 500 chars.")
         return
-    user_temp_data[uid]['about'] = about
-    user_states[uid] = "awaiting_media"
-    user_temp_data[uid]['media_list'] = []
+    user_temp_data[chat_id]['about'] = about
+    user_states[chat_id] = "awaiting_media"
+    user_temp_data[chat_id]['media_list'] = []
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("📷 Done (Finish Media)"))
-    bot.reply_to(m, "About saved.\nSend **1-3 photos/videos**, then tap 'Done (Finish Media)':", reply_markup=markup)
+    bot.reply_to(message, "✅ About saved.\nSend **1-3 photos/videos**, then tap 'Done (Finish Media)':", reply_markup=markup)
 
+@bot.message_handler(commands=['skip'])
+def skip_about(message):
+    chat_id = message.chat.id
+    if user_states.get(chat_id) == "awaiting_about":
+        user_temp_data[chat_id]['about'] = ""
+        user_states[chat_id] = "awaiting_media"
+        user_temp_data[chat_id]['media_list'] = []
+        bot.reply_to(message, "✅ About skipped. Send **1-3 photos/videos**, then tap 'Done (Finish Media)':", reply_markup=types.ReplyKeyboardRemove())
+
+# ---------- Media collection ----------
 @bot.message_handler(content_types=['photo', 'video'])
-def collect_media(m):
-    uid = m.from_user.id
-    if user_states.get(uid) != "awaiting_media":
+def collect_media(message):
+    chat_id = message.chat.id
+    if user_states.get(chat_id) != "awaiting_media":
         return
-    media_list = user_temp_data[uid].get('media_list', [])
+    media_list = user_temp_data[chat_id].get('media_list', [])
     if len(media_list) >= 3:
-        bot.reply_to(m, "❌ Max 3 files. Tap 'Done'.")
+        bot.reply_to(message, "❌ Max 3 files. Tap 'Done (Finish Media)'.")
         return
-    if m.photo:
-        file_id = m.photo[-1].file_id
+    if message.photo:
+        file_id = message.photo[-1].file_id
         media_type = 'photo'
-    elif m.video:
-        file_id = m.video.file_id
+    elif message.video:
+        file_id = message.video.file_id
         media_type = 'video'
     else:
         return
     media_list.append({'file_id': file_id, 'type': media_type})
-    user_temp_data[uid]['media_list'] = media_list
+    user_temp_data[chat_id]['media_list'] = media_list
     remaining = 3 - len(media_list)
-    bot.reply_to(m, f"✅ Media {len(media_list)}/3 added. {remaining} remaining. Send more or tap 'Done'.")
+    bot.reply_to(message, f"✅ Media {len(media_list)}/3 added. {remaining} remaining. Send more or tap 'Done'.")
 
+# ---------- Done button ----------
 @bot.message_handler(func=lambda m: m.text == "📷 Done (Finish Media)")
-def done_media(m):
-    uid = m.from_user.id
-    if user_states.get(uid) != "awaiting_media":
+def done_media(message):
+    chat_id = message.chat.id
+    if user_states.get(chat_id) != "awaiting_media":
         return
-    media_list = user_temp_data[uid].get('media_list', [])
+    media_list = user_temp_data[chat_id].get('media_list', [])
     if len(media_list) == 0:
-        bot.reply_to(m, "❌ Please send at least 1 photo or video.")
+        bot.reply_to(message, "❌ Please send at least 1 photo or video.")
         return
-    temp = user_temp_data[uid]
+    temp = user_temp_data[chat_id]
     preview = f"📋 **Profile Preview**\n"
     preview += f"👤 Name: {temp.get('name')}\n"
     preview += f"⚧ Gender: {'Male' if temp.get('gender')=='male' else 'Female'}\n"
@@ -211,70 +234,52 @@ def done_media(m):
     preview += f"📷 Media: {len(media_list)} file(s)\n\nConfirm to save?"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("CONFIRM"), types.KeyboardButton("CANCEL"))
-    first = media_list[0]
-    try:
-        if first['type'] == 'photo':
-            bot.send_photo(m.chat.id, first['file_id'], caption=preview, parse_mode='Markdown', reply_markup=markup)
-        else:
-            bot.send_video(m.chat.id, first['file_id'], caption=preview, parse_mode='Markdown', reply_markup=markup)
-    except:
-        bot.reply_to(m, preview, reply_markup=markup)
-    for media in media_list[1:]:
-        try:
-            if media['type'] == 'photo':
-                bot.send_photo(m.chat.id, media['file_id'])
-            else:
-                bot.send_video(m.chat.id, media['file_id'])
-        except:
-            pass
-    user_states[uid] = "awaiting_confirm"
+    user_states[chat_id] = "awaiting_confirm"
+    bot.send_message(chat_id, preview, reply_markup=markup)
 
-# ------------------------- Confirm / Cancel (TOP-LEVEL handlers) -------------------------
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CONFIRM")
-def confirm_profile(m):
-    uid = m.from_user.id
-    temp = user_temp_data.pop(uid, {})
-    user_states.pop(uid, None)
+# ---------- Confirm / Cancel ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_confirm" and m.text == "CONFIRM")
+def confirm_profile(message):
+    chat_id = message.chat.id
+    temp = user_temp_data.pop(chat_id, {})
+    user_states.pop(chat_id, None)
     media_urls = []
     for media in temp.get('media_list', []):
-        url = upload_media_to_channel(media['file_id'], uid, media['type'])
+        url = upload_media_to_channel(media['file_id'], chat_id, media['type'])
         media_urls.append(url)
-    loc = temp.get('location')
-    if not loc or loc == "":
-        loc = None
     profile = {
-        "user_id": uid,
-        "username": m.from_user.username,
+        "user_id": chat_id,
+        "username": message.from_user.username,
         "name": temp.get('name'),
         "gender": temp.get('gender'),
         "age": temp.get('age'),
-        "location": loc,
         "location_text": temp.get('location', ''),
         "about": temp.get('about', ''),
         "media": media_urls,
         "created_at": datetime.utcnow(),
         "is_active": True
     }
-    db.profiles.update_one({"user_id": uid}, {"$set": profile}, upsert=True)
-    db.users.update_one({"user_id": uid}, {"$set": {"setup_complete": True, "last_active": datetime.utcnow()}}, upsert=True)
+    db.profiles.update_one({"user_id": chat_id}, {"$set": profile}, upsert=True)
+    db.users.update_one({"user_id": chat_id}, {"$set": {"setup_complete": True, "last_active": datetime.utcnow()}}, upsert=True)
 
-    bot.reply_to(m, "🎉 **Profile Created!** 🎉\n\nNow set your preference.", reply_markup=types.ReplyKeyboardRemove())
+    bot.reply_to(message, "🎉 **Profile Created!** 🎉\n\nNow set your preference.", reply_markup=types.ReplyKeyboardRemove())
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"), types.KeyboardButton("👥 Both"))
-    user_states[uid] = "awaiting_preference"
-    bot.reply_to(m, "Who do you want to see in your feed?", reply_markup=markup)
+    user_states[chat_id] = "awaiting_preference"
+    bot.send_message(chat_id, "Who do you want to see in your feed?", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CANCEL")
-def cancel_profile(m):
-    uid = m.from_user.id
-    user_states.pop(uid, None)
-    user_temp_data.pop(uid, None)
-    bot.reply_to(m, "❌ Profile creation cancelled. Use /start.", reply_markup=types.ReplyKeyboardRemove())
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_confirm" and m.text == "CANCEL")
+def cancel_profile(message):
+    chat_id = message.chat.id
+    user_states.pop(chat_id, None)
+    user_temp_data.pop(chat_id, None)
+    bot.reply_to(message, "❌ Profile creation cancelled. Use /start.", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_preference")
-def set_preference(m):
-    uid = m.from_user.id
-    text = m.text.strip()
+# ---------- Preference ----------
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_preference")
+def set_preference(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
     if text == "👨 Male":
         pref = "male"
     elif text == "👩 Female":
@@ -282,281 +287,190 @@ def set_preference(m):
     elif text == "👥 Both":
         pref = "both"
     else:
-        bot.reply_to(m, "❌ Tap Male, Female or Both button.")
+        bot.reply_to(message, "❌ Tap Male, Female or Both button.")
         return
-    db.users.update_one({"user_id": uid}, {"$set": {"preference": pref}}, upsert=True)
-    user_states.pop(uid, None)
-    bot.reply_to(m, f"✅ Preference set to {text}.", reply_markup=types.ReplyKeyboardRemove())
-    show_main_menu(m.chat.id)
+    db.users.update_one({"user_id": chat_id}, {"$set": {"preference": pref}}, upsert=True)
+    user_states.pop(chat_id, None)
+    bot.reply_to(message, f"✅ Preference set to {text}.", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(chat_id)
 
+# ---------- MY PROFILE ----------
 @bot.message_handler(func=lambda m: m.text == "👤 MY PROFILE")
-def my_profile(m):
-    uid = m.from_user.id
-    profile = db.profiles.find_one({"user_id": uid, "is_active": True})
+def my_profile(message):
+    chat_id = message.chat.id
+    profile = db.profiles.find_one({"user_id": chat_id, "is_active": True})
     if not profile:
-        bot.reply_to(m, "❌ No profile found. Use /start to create one.")
-        show_main_menu(m.chat.id)
+        bot.reply_to(message, "❌ No profile found. Use /start to create one.")
+        show_main_menu(chat_id)
         return
     text = f"👤 **YOUR PROFILE**\n\n📛 Name: {profile.get('name')}\n⚧ Gender: {'Male' if profile.get('gender')=='male' else 'Female'}\n🎂 Age: {profile.get('age')}\n📍 Location: {profile.get('location_text', 'Not set')}\n📝 About: {profile.get('about', 'Not set')[:200]}\n📷 Media: {len(profile.get('media', []))} file(s)"
-    
     media_list = profile.get('media', [])
     if media_list:
         try:
-            bot.send_photo(m.chat.id, media_list[0], caption=text, parse_mode='Markdown')
+            bot.send_photo(chat_id, media_list[0], caption=text, parse_mode='Markdown')
         except:
-            bot.send_message(m.chat.id, text, parse_mode='Markdown')
-        for url in media_list[1:]:
-            try:
-                bot.send_photo(m.chat.id, url)
-            except:
-                pass
+            bot.send_message(chat_id, text, parse_mode='Markdown')
     else:
-        bot.reply_to(m, text, parse_mode='Markdown')
-    
+        bot.send_message(chat_id, text, parse_mode='Markdown')
+    # Edit and Main Menu buttons
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("✏️ EDIT PROFILE"), types.KeyboardButton("🏠 MAIN MENU"))
-    bot.send_message(m.chat.id, "What would you like to do?", reply_markup=markup)
+    bot.send_message(chat_id, "What would you like to do?", reply_markup=markup)
 
-# ---------- EDIT PROFILE helpers ----------
-def edit_send_current(chat_id, uid, edit_step):
-    profile = db.profiles.find_one({"user_id": uid, "is_active": True})
-    if not profile:
-        bot.send_message(chat_id, "❌ Profile not found.")
-        show_main_menu(chat_id)
-        return
-    if edit_step == "name":
-        bot.send_message(chat_id, f"✏️ Current Name: {profile.get('name')}\nSend new name (2-50 chars) or /skip:", reply_markup=types.ReplyKeyboardRemove())
-    elif edit_step == "age":
-        bot.send_message(chat_id, f"✏️ Current Age: {profile.get('age')}\nSend new age (18-100) or /skip:", reply_markup=types.ReplyKeyboardRemove())
-    elif edit_step == "gender":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
-        bot.send_message(chat_id, f"✏️ Current Gender: {'Male' if profile.get('gender')=='male' else 'Female'}\nSelect new gender:", reply_markup=markup)
-    elif edit_step == "location":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-        markup.add(types.KeyboardButton("⏭️ Skip (keep current)"))
-        bot.send_message(chat_id, f"✏️ Current Location: {profile.get('location_text', 'Not set')}\nSend new location or tap Skip:", reply_markup=markup)
-    elif edit_step == "about":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-        markup.add(types.KeyboardButton("⏭️ Skip (keep current)"))
-        bot.send_message(chat_id, f"✏️ Current About: {profile.get('about', 'Not set')[:100]}\nSend new about (max 500 chars) or Skip:", reply_markup=markup)
-    elif edit_step == "media":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-        markup.add(types.KeyboardButton("📷 Done (Finish Media)"), types.KeyboardButton("⏭️ Skip (keep current)"))
-        bot.send_message(chat_id, "✏️ Edit Media\nSend new photos/videos (max 3), then tap 'Done' or 'Skip':", reply_markup=markup)
-        user_temp_data[uid] = {'edit_media_list': []}
-
+# ---------- EDIT PROFILE (simple version – only name, age, gender, location, about) ----------
 @bot.message_handler(func=lambda m: m.text == "✏️ EDIT PROFILE")
-def edit_profile_start(m):
-    uid = m.from_user.id
+def edit_profile_start(message):
+    chat_id = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("📛 Name"), types.KeyboardButton("🎂 Age"))
     markup.add(types.KeyboardButton("⚧ Gender"), types.KeyboardButton("📍 Location"))
-    markup.add(types.KeyboardButton("📝 About"), types.KeyboardButton("📷 Photos/Videos"))
-    markup.add(types.KeyboardButton("❌ Cancel"))
-    bot.send_message(m.chat.id, "✏️ **Edit Profile**\nChoose what to edit:", reply_markup=markup)
-    user_states[uid] = "editing_choose"
+    markup.add(types.KeyboardButton("📝 About"), types.KeyboardButton("❌ Cancel"))
+    bot.send_message(chat_id, "✏️ **Edit Profile**\nChoose what to edit:", reply_markup=markup)
+    user_states[chat_id] = "editing_choose"
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_choose")
-def edit_choose(m):
-    uid = m.from_user.id
-    choice = m.text.strip()
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_choose")
+def edit_choose(message):
+    chat_id = message.chat.id
+    choice = message.text.strip()
     if choice == "❌ Cancel":
-        user_states.pop(uid, None)
-        show_main_menu(m.chat.id)
+        user_states.pop(chat_id, None)
+        show_main_menu(chat_id)
         return
     elif choice == "📛 Name":
-        user_states[uid] = "editing_name"
-        edit_send_current(m.chat.id, uid, "name")
+        user_states[chat_id] = "editing_name"
+        bot.send_message(chat_id, "Send new name (2-50 chars) or /skip:", reply_markup=types.ReplyKeyboardRemove())
     elif choice == "🎂 Age":
-        user_states[uid] = "editing_age"
-        edit_send_current(m.chat.id, uid, "age")
+        user_states[chat_id] = "editing_age"
+        bot.send_message(chat_id, "Send new age (18-100) or /skip:", reply_markup=types.ReplyKeyboardRemove())
     elif choice == "⚧ Gender":
-        user_states[uid] = "editing_gender"
-        edit_send_current(m.chat.id, uid, "gender")
+        user_states[chat_id] = "editing_gender"
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"))
+        bot.send_message(chat_id, "Select new gender:", reply_markup=markup)
     elif choice == "📍 Location":
-        user_states[uid] = "editing_location"
-        edit_send_current(m.chat.id, uid, "location")
+        user_states[chat_id] = "editing_location"
+        bot.send_message(chat_id, "Send new location or /skip:", reply_markup=types.ReplyKeyboardRemove())
     elif choice == "📝 About":
-        user_states[uid] = "editing_about"
-        edit_send_current(m.chat.id, uid, "about")
-    elif choice == "📷 Photos/Videos":
-        user_states[uid] = "editing_media"
-        edit_send_current(m.chat.id, uid, "media")
+        user_states[chat_id] = "editing_about"
+        bot.send_message(chat_id, "Send new about (max 500 chars) or /skip:", reply_markup=types.ReplyKeyboardRemove())
     else:
-        bot.reply_to(m, "Please use the buttons.")
+        edit_profile_start(message)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_name")
-def edit_name(m):
-    uid = m.from_user.id
-    new_name = m.text.strip()
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_name")
+def edit_name(message):
+    chat_id = message.chat.id
+    new_name = message.text.strip()
     if new_name == "/skip":
-        bot.reply_to(m, "✅ Name kept.")
+        bot.reply_to(message, "✅ Name kept.")
     elif len(new_name) < 2 or len(new_name) > 50:
-        bot.reply_to(m, "❌ Name must be 2-50 chars. Try again or /skip:")
+        bot.reply_to(message, "❌ Name must be 2-50 chars. Try again or /skip:")
         return
     else:
-        db.profiles.update_one({"user_id": uid}, {"$set": {"name": new_name}})
-        bot.reply_to(m, f"✅ Name updated to {new_name}.")
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
+        db.profiles.update_one({"user_id": chat_id}, {"$set": {"name": new_name}})
+        bot.reply_to(message, f"✅ Name updated to {new_name}.")
+    user_states.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_age")
-def edit_age(m):
-    uid = m.from_user.id
-    if m.text == "/skip":
-        bot.reply_to(m, "✅ Age kept.")
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_age")
+def edit_age(message):
+    chat_id = message.chat.id
+    if message.text == "/skip":
+        bot.reply_to(message, "✅ Age kept.")
     else:
         try:
-            new_age = int(m.text.strip())
+            new_age = int(message.text.strip())
             if new_age < 18 or new_age > 100:
                 raise ValueError
-            db.profiles.update_one({"user_id": uid}, {"$set": {"age": new_age}})
-            bot.reply_to(m, f"✅ Age updated to {new_age}.")
+            db.profiles.update_one({"user_id": chat_id}, {"$set": {"age": new_age}})
+            bot.reply_to(message, f"✅ Age updated to {new_age}.")
         except:
-            bot.reply_to(m, "❌ Invalid age. Send 18-100 or /skip:")
+            bot.reply_to(message, "❌ Invalid age. Send 18-100 or /skip:")
             return
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
+    user_states.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_gender")
-def edit_gender(m):
-    uid = m.from_user.id
-    text = m.text.strip()
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_gender")
+def edit_gender(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
     if text == "👨 Male":
         new_gender = "male"
     elif text == "👩 Female":
         new_gender = "female"
     else:
-        bot.reply_to(m, "❌ Tap Male or Female button.")
+        bot.reply_to(message, "❌ Tap Male or Female button.")
         return
-    db.profiles.update_one({"user_id": uid}, {"$set": {"gender": new_gender}})
-    bot.reply_to(m, f"✅ Gender updated to {text}.")
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
+    db.profiles.update_one({"user_id": chat_id}, {"$set": {"gender": new_gender}})
+    bot.reply_to(message, f"✅ Gender updated to {text}.")
+    user_states.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_location")
-def edit_location(m):
-    uid = m.from_user.id
-    if m.text == "⏭️ Skip (keep current)":
-        bot.reply_to(m, "✅ Location kept.")
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_location")
+def edit_location(message):
+    chat_id = message.chat.id
+    if message.text == "/skip":
+        bot.reply_to(message, "✅ Location kept.")
     else:
-        new_loc = m.text.strip()
+        new_loc = message.text.strip()
         if len(new_loc) < 2:
-            bot.reply_to(m, "❌ Invalid location. Try again or Skip.")
+            bot.reply_to(message, "❌ Invalid location. Try again or /skip.")
             return
-        db.profiles.update_one({"user_id": uid}, {"$set": {"location_text": new_loc, "location": None}})
-        bot.reply_to(m, f"✅ Location updated to {new_loc}.")
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
+        db.profiles.update_one({"user_id": chat_id}, {"$set": {"location_text": new_loc}})
+        bot.reply_to(message, f"✅ Location updated to {new_loc}.")
+    user_states.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_about")
-def edit_about(m):
-    uid = m.from_user.id
-    if m.text == "⏭️ Skip (keep current)":
-        bot.reply_to(m, "✅ About kept.")
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "editing_about")
+def edit_about(message):
+    chat_id = message.chat.id
+    if message.text == "/skip":
+        bot.reply_to(message, "✅ About kept.")
     else:
-        new_about = m.text.strip()
+        new_about = message.text.strip()
         if len(new_about) > 500:
-            bot.reply_to(m, "❌ Too long (max 500). Try again or Skip.")
+            bot.reply_to(message, "❌ Too long (max 500). Try again or /skip.")
             return
-        db.profiles.update_one({"user_id": uid}, {"$set": {"about": new_about}})
-        bot.reply_to(m, "✅ About updated.")
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
+        db.profiles.update_one({"user_id": chat_id}, {"$set": {"about": new_about}})
+        bot.reply_to(message, "✅ About updated.")
+    user_states.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-@bot.message_handler(content_types=['photo', 'video'])
-def edit_collect_media(m):
-    uid = m.from_user.id
-    if user_states.get(uid) != "editing_media":
-        return
-    temp = user_temp_data.get(uid, {})
-    media_list = temp.get('edit_media_list', [])
-    if len(media_list) >= 3:
-        bot.reply_to(m, "❌ Max 3 files. Tap 'Done'.")
-        return
-    if m.photo:
-        file_id = m.photo[-1].file_id
-        media_type = 'photo'
-    elif m.video:
-        file_id = m.video.file_id
-        media_type = 'video'
-    else:
-        return
-    media_list.append({'file_id': file_id, 'type': media_type})
-    user_temp_data[uid] = {'edit_media_list': media_list}
-    remaining = 3 - len(media_list)
-    bot.reply_to(m, f"✅ Media {len(media_list)}/3 added. {remaining} remaining. Send more or tap 'Done'.")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_media" and m.text == "📷 Done (Finish Media)")
-def edit_media_done(m):
-    uid = m.from_user.id
-    temp = user_temp_data.pop(uid, {})
-    media_list = temp.get('edit_media_list', [])
-    if not media_list:
-        bot.reply_to(m, "No new media sent. Keeping existing.")
-        user_states.pop(uid, None)
-        show_main_menu(m.chat.id)
-        return
-    media_urls = []
-    for media in media_list:
-        url = upload_media_to_channel(media['file_id'], uid, media['type'])
-        media_urls.append(url)
-    db.profiles.update_one({"user_id": uid}, {"$set": {"media": media_urls}})
-    bot.reply_to(m, f"✅ Media updated! {len(media_urls)} file(s) saved.")
-    user_states.pop(uid, None)
-    show_main_menu(m.chat.id)
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "editing_media" and m.text == "⏭️ Skip (keep current)")
-def edit_media_skip(m):
-    uid = m.from_user.id
-    user_temp_data.pop(uid, None)
-    user_states.pop(uid, None)
-    bot.reply_to(m, "✅ Media kept.")
-    show_main_menu(m.chat.id)
-
-# ------------------------- VIEW PROFILES -------------------------
+# ---------- VIEW PROFILES (with swipe logic) ----------
 @bot.message_handler(func=lambda m: m.text == "👀 VIEW PROFILES")
-def view_profiles(m):
-    uid = m.from_user.id
-    logger.info(f"VIEW PROFILES pressed by user {uid}")
-    my_profile = db.profiles.find_one({"user_id": uid, "is_active": True})
+def view_profiles(message):
+    chat_id = message.chat.id
+    my_profile = db.profiles.find_one({"user_id": chat_id, "is_active": True})
     if not my_profile:
-        bot.reply_to(m, "❌ Create profile first using /start.")
-        show_main_menu(m.chat.id)
+        bot.reply_to(message, "❌ Create profile first using /start.")
+        show_main_menu(chat_id)
         return
-    
-    user = db.users.find_one({"user_id": uid})
+    user = db.users.find_one({"user_id": chat_id})
     pref = user.get("preference", "both") if user else "both"
-    
-    query = {"user_id": {"$ne": uid}, "is_active": True}
+    query = {"user_id": {"$ne": chat_id}, "is_active": True}
     if pref == "male":
         query["gender"] = "male"
     elif pref == "female":
         query["gender"] = "female"
-    
+    # Exclude already liked profiles (optional: keep them for repeat)
+    liked = db.likes.distinct("to_user", {"from_user": chat_id})
+    query["user_id"] = {"$nin": liked}
     profiles = list(db.profiles.find(query).limit(200))
     if not profiles:
-        bot.reply_to(m, "😔 No other active profiles found. Ask friends to join!")
-        show_main_menu(m.chat.id)
+        bot.reply_to(message, "😔 No other active profiles found. Try changing preference.")
+        show_main_menu(chat_id)
         return
-    
     random.shuffle(profiles)
-    swipe_sessions[uid] = {"profiles": profiles, "index": 0}
-    logger.info(f"Created swipe session for user {uid} with {len(profiles)} profiles")
-    send_profile(m.chat.id, uid)
+    swipe_sessions[chat_id] = {"profiles": profiles, "index": 0}
+    send_profile(chat_id)
 
-def send_profile(chat_id, uid):
-    session = swipe_sessions.get(uid)
+def send_profile(chat_id):
+    session = swipe_sessions.get(chat_id)
     if not session:
-        logger.warning(f"send_profile: no session for user {uid}")
         return
     profiles = session["profiles"]
-    if not profiles:
-        bot.send_message(chat_id, "❌ No profiles available.")
-        return
     idx = session["index"]
     if idx >= len(profiles):
+        # Loop back to start
         idx = 0
         session["index"] = 0
     p = profiles[idx]
@@ -564,7 +478,6 @@ def send_profile(chat_id, uid):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton("❤️ LIKE"),
-        types.KeyboardButton("💬 CHAT"),
         types.KeyboardButton("⏭️ SKIP"),
         types.KeyboardButton("🛑 STOP VIEWING")
     )
@@ -577,252 +490,143 @@ def send_profile(chat_id, uid):
     else:
         bot.send_message(chat_id, text, reply_markup=markup)
     session["current_profile_id"] = p["user_id"]
-    logger.info(f"User {uid} viewing profile {idx+1}/{len(profiles)}: {p.get('name')}")
 
-# ------------------------- LIKE -------------------------
+# ---------- LIKE ----------
 @bot.message_handler(func=lambda m: m.text == "❤️ LIKE")
-def like_profile(m):
-    uid = m.from_user.id
-    session = swipe_sessions.get(uid)
+def like_profile(message):
+    chat_id = message.chat.id
+    session = swipe_sessions.get(chat_id)
     if not session:
-        bot.reply_to(m, "No active swipe session.")
+        bot.reply_to(message, "No active swipe session. Use VIEW PROFILES.")
         return
     target_id = session.get("current_profile_id")
     if not target_id:
         return
-    
+    # Insert like (idempotent)
     db.likes.update_one(
-        {"from_user": uid, "to_user": target_id},
+        {"from_user": chat_id, "to_user": target_id},
         {"$set": {"created_at": datetime.utcnow()}},
         upsert=True
     )
-    mutual = db.likes.find_one({"from_user": target_id, "to_user": uid})
-    if mutual:
-        db.likes.update_many(
-            {"$or": [{"from_user": uid, "to_user": target_id}, {"from_user": target_id, "to_user": uid}]},
-            {"$set": {"is_mutual": True}}
-        )
-        bot.reply_to(m, "🎉 It's a match! You can now chat.")
-    else:
-        bot.reply_to(m, "❤️ Liked!")
+    bot.reply_to(message, "❤️ Liked!")
+    # Move to next profile
     session["index"] += 1
-    send_profile(m.chat.id, uid)
+    send_profile(chat_id)
 
-# ------------------------- CHAT (only after mutual match) -------------------------
-@bot.message_handler(func=lambda m: m.text == "💬 CHAT")
-def chat_handler(m):
-    uid = m.from_user.id
-    session = swipe_sessions.get(uid)
+# ---------- SKIP ----------
+@bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
+def skip_profile(message):
+    chat_id = message.chat.id
+    session = swipe_sessions.get(chat_id)
     if not session:
-        bot.reply_to(m, "❌ No active swipe session. Use VIEW PROFILES.")
+        bot.reply_to(message, "No active session. Tap VIEW PROFILES first.")
         return
-    target_id = session.get("current_profile_id")
-    if not target_id:
-        bot.reply_to(m, "❌ Profile not found.")
-        return
-    
-    user_likes_target = db.likes.find_one({"from_user": uid, "to_user": target_id})
-    target_likes_user = db.likes.find_one({"from_user": target_id, "to_user": uid})
-    if not (user_likes_target and target_likes_user):
-        bot.reply_to(m, "💬 Chat only allowed after mutual match. Like each other first!")
-        return
-    
-    target_profile = db.profiles.find_one({"user_id": target_id, "is_active": True})
-    if not target_profile:
-        bot.reply_to(m, "❌ Target profile not active.")
-        return
-    
-    target_name = target_profile.get('name', 'User')
-    user_temp_data[uid] = {"chat_target": target_id, "chat_target_name": target_name}
-    user_temp_data[target_id] = {"chat_target": uid, "chat_target_name": m.from_user.first_name}
-    bot.reply_to(m, f"💬 You can now message {target_name}. Send your message (text/photo/video):")
-    user_states[uid] = "awaiting_chat_message"
-
-# ------------------------- Message forwarder -------------------------
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_chat_message", content_types=['text', 'photo', 'video'])
-def receive_chat_message(m):
-    uid = m.from_user.id
-    # Ignore control buttons
-    if m.text and m.text in ["❤️ LIKE", "💬 CHAT", "⏭️ SKIP", "SKIP", "🛑 STOP VIEWING", "STOP VIEWING", "STOP"]:
-        return
-    
-    target_info = user_temp_data.get(uid, {})
-    target_id = target_info.get("chat_target")
-    target_name = target_info.get("chat_target_name")
-    
-    if not target_id:
-        bot.reply_to(m, "❌ Chat session expired. Use VIEW PROFILES again.")
-        user_states.pop(uid, None)
-        user_temp_data.pop(uid, None)
-        return
-    
-    try:
-        if m.text:
-            bot.send_message(target_id, f"💬 Message from {m.from_user.first_name}:\n{m.text}")
-        elif m.photo:
-            bot.send_photo(target_id, m.photo[-1].file_id, caption=f"📸 Photo from {m.from_user.first_name}")
-        elif m.video:
-            bot.send_video(target_id, m.video.file_id, caption=f"🎥 Video from {m.from_user.first_name}")
-        bot.reply_to(m, f"✅ Message sent to {target_name}.")
-    except Exception as e:
-        bot.reply_to(m, f"❌ Could not deliver message: {e}")
-
-def start_view_profiles_for_user(chat_id, user_id):
-    if user_id in swipe_sessions:
-        del swipe_sessions[user_id]
-    my_profile = db.profiles.find_one({"user_id": user_id, "is_active": True})
-    if not my_profile:
-        bot.send_message(chat_id, "❌ Create profile first using /start.")
-        show_main_menu(chat_id)
-        return
-    user = db.users.find_one({"user_id": user_id})
-    pref = user.get("preference", "both") if user else "both"
-    query = {"user_id": {"$ne": user_id}, "is_active": True}
-    if pref == "male":
-        query["gender"] = "male"
-    elif pref == "female":
-        query["gender"] = "female"
-    profiles = list(db.profiles.find(query).limit(200))
-    if not profiles:
-        bot.send_message(chat_id, "😔 No other active profiles found. Ask friends to join!")
-        show_main_menu(chat_id)
-        return
-    random.shuffle(profiles)
-    swipe_sessions[user_id] = {"profiles": profiles, "index": 0}
-    send_profile(chat_id, user_id)
-
-# ------------------------- SKIP BUTTON (with logging) -------------------------
-@bot.message_handler(func=lambda m: m.text in ["⏭️ SKIP", "SKIP"])
-def skip_profile(m):
-    uid = m.from_user.id
-    logger.info(f"SKIP pressed by user {uid}")
-
-    # Chat mode skip
-    if user_states.get(uid) == "awaiting_chat_message":
-        logger.info(f"User {uid} is in chat mode, performing chat skip")
-        target_info = user_temp_data.get(uid, {})
-        target_id = target_info.get("chat_target")
-        user_states.pop(uid, None)
-        user_temp_data.pop(uid, None)
-        if target_id:
-            user_states.pop(target_id, None)
-            user_temp_data.pop(target_id, None)
-            try:
-                bot.send_message(target_id, f"⚠️ {m.from_user.first_name} skipped the chat.")
-            except:
-                pass
-        start_view_profiles_for_user(m.chat.id, uid)
-        return
-
-    # Normal swiping mode
-    session = swipe_sessions.get(uid)
-    if not session:
-        bot.reply_to(m, "❌ No active session. Tap VIEW PROFILES first.")
-        return
-    
-    old_index = session["index"]
     session["index"] += 1
-    logger.info(f"User {uid} skip: index from {old_index} to {session['index']}, profiles count {len(session['profiles'])}")
-    
     if session["index"] >= len(session["profiles"]):
+        # End reached: reshuffle and restart
         random.shuffle(session["profiles"])
         session["index"] = 0
-        logger.info(f"User {uid} reached end, shuffled profiles, new index 0")
-    
-    send_profile(m.chat.id, uid)
+    send_profile(chat_id)
 
-# ------------------------- STOP VIEWING -------------------------
-@bot.message_handler(func=lambda m: m.text in ["🛑 STOP VIEWING", "STOP VIEWING", "STOP"])
-def stop_viewing(m):
-    uid = m.from_user.id
-    if user_states.get(uid) == "awaiting_chat_message":
-        target_info = user_temp_data.get(uid, {})
-        target_id = target_info.get("chat_target")
-        if target_id:
-            user_states.pop(target_id, None)
-            user_temp_data.pop(target_id, None)
-        user_states.pop(uid, None)
-        user_temp_data.pop(uid, None)
-    swipe_sessions.pop(uid, None)
-    show_main_menu(m.chat.id)
+# ---------- STOP VIEWING ----------
+@bot.message_handler(func=lambda m: m.text == "🛑 STOP VIEWING")
+def stop_viewing(message):
+    chat_id = message.chat.id
+    swipe_sessions.pop(chat_id, None)
+    show_main_menu(chat_id)
 
-# ------------------------- CHANGE INTEREST -------------------------
+# ---------- CHANGE INTEREST ----------
 @bot.message_handler(func=lambda m: m.text == "🎯 CHANGE INTEREST")
-def change_interest(m):
+def change_interest(message):
+    chat_id = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"), types.KeyboardButton("👥 Both"))
-    bot.reply_to(m, "Select your new preference:", reply_markup=markup)
-    user_states[m.from_user.id] = "changing_interest"
+    bot.reply_to(message, "Select your new preference:", reply_markup=markup)
+    user_states[chat_id] = "changing_interest"
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "changing_interest")
-def update_interest(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    if text in ["👨 Male", "👩 Female", "👥 Both"]:
-        pref = "male" if text == "👨 Male" else "female" if text == "👩 Female" else "both"
-        db.users.update_one({"user_id": uid}, {"$set": {"preference": pref}})
-        bot.reply_to(m, f"Preference changed to {text}.", reply_markup=types.ReplyKeyboardRemove())
-        user_states.pop(uid, None)
-        show_main_menu(m.chat.id)
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "changing_interest")
+def update_interest(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
+    if text == "👨 Male":
+        pref = "male"
+    elif text == "👩 Female":
+        pref = "female"
+    elif text == "👥 Both":
+        pref = "both"
     else:
-        bot.reply_to(m, "Use buttons.")
+        bot.reply_to(message, "❌ Use the buttons.")
+        return
+    db.users.update_one({"user_id": chat_id}, {"$set": {"preference": pref}})
+    user_states.pop(chat_id, None)
+    bot.reply_to(message, f"Preference changed to {text}.", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(chat_id)
 
-# ------------------------- STATS -------------------------
+# ---------- STATS ----------
 @bot.message_handler(func=lambda m: m.text == "📊 STATS")
-def stats(m):
-    uid = m.from_user.id
-    given = db.likes.count_documents({"from_user": uid})
-    received = db.likes.count_documents({"to_user": uid})
-    bot.reply_to(m, f"📊 **Stats**\nLikes given: {given}\nLikes received: {received}")
-    show_main_menu(m.chat.id)
+def stats(message):
+    chat_id = message.chat.id
+    given = db.likes.count_documents({"from_user": chat_id})
+    received = db.likes.count_documents({"to_user": chat_id})
+    bot.reply_to(message, f"📊 **Stats**\nLikes given: {given}\nLikes received: {received}")
+    show_main_menu(chat_id)
 
-# ------------------------- SETTINGS & DELETE -------------------------
+# ---------- SETTINGS & DELETE ----------
 @bot.message_handler(func=lambda m: m.text == "⚙️ SETTINGS")
-def settings(m):
+def settings(message):
+    chat_id = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(types.KeyboardButton("🗑 DELETE ACCOUNT"), types.KeyboardButton("🔙 BACK"))
-    bot.reply_to(m, "⚙️ Settings", reply_markup=markup)
+    bot.reply_to(message, "⚙️ Settings", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🗑 DELETE ACCOUNT")
-def ask_delete(m):
+def ask_delete(message):
+    chat_id = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("✅ CONFIRM DELETE"), types.KeyboardButton("❌ CANCEL"))
-    bot.reply_to(m, "⚠️ Are you sure? This is permanent.", reply_markup=markup)
+    bot.reply_to(message, "⚠️ Are you sure? This is permanent.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "✅ CONFIRM DELETE")
-def confirm_delete(m):
-    uid = m.from_user.id
-    db.profiles.update_one({"user_id": uid}, {"$set": {"is_active": False}})
-    db.users.update_one({"user_id": uid}, {"$set": {"is_active": False}})
-    bot.reply_to(m, "Account deleted. Use /start to create new.", reply_markup=types.ReplyKeyboardRemove())
-    user_states.pop(uid, None)
-    swipe_sessions.pop(uid, None)
+def confirm_delete(message):
+    chat_id = message.chat.id
+    db.profiles.update_one({"user_id": chat_id}, {"$set": {"is_active": False}})
+    db.users.update_one({"user_id": chat_id}, {"$set": {"is_active": False}})
+    bot.reply_to(message, "Account deleted. Use /start to create new.", reply_markup=types.ReplyKeyboardRemove())
+    user_states.pop(chat_id, None)
+    swipe_sessions.pop(chat_id, None)
+    show_main_menu(chat_id)
 
 @bot.message_handler(func=lambda m: m.text == "❌ CANCEL")
-def cancel_action(m):
-    show_main_menu(m.chat.id)
+def cancel_action(message):
+    show_main_menu(message.chat.id)
 
 @bot.message_handler(func=lambda m: m.text == "🔙 BACK")
-def back_main(m):
-    show_main_menu(m.chat.id)
+def back_main(message):
+    show_main_menu(message.chat.id)
 
-# ------------------------- NOTIFICATIONS -------------------------
+# ---------- NOTIFICATIONS (placeholder) ----------
 @bot.message_handler(func=lambda m: m.text == "🔔 NOTIFICATIONS")
-def notifications(m):
-    bot.reply_to(m, "🔔 No new notifications.", reply_markup=types.ReplyKeyboardRemove())
-    show_main_menu(m.chat.id)
+def notifications(message):
+    bot.reply_to(message, "🔔 No new notifications.", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(message.chat.id)
 
-# ------------------------- FALLBACK (LAST) -------------------------
+# ---------- FALLBACK (MUST BE LAST) ----------
 @bot.message_handler(func=lambda m: True)
-def fallback(m):
-    bot.reply_to(m, "❌ Invalid command. Use /start or buttons.", reply_markup=types.ReplyKeyboardRemove())
+def fallback(message):
+    bot.reply_to(message, "❌ Invalid command. Use /start or buttons.", reply_markup=types.ReplyKeyboardRemove())
 
-# ------------------------- MAIN -------------------------
+# ---------- MAIN ----------
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+        logger.info("Webhook removed")
+    except Exception as e:
+        logger.error(f"Webhook removal failed: {e}")
     logger.info("Bot polling started...")
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
 
 if __name__ == "__main__":
     main()
