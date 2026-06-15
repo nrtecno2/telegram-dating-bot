@@ -242,7 +242,7 @@ def done_media(m):
             pass
     user_states[uid] = "awaiting_confirm"
 
-# ---------- Confirm / Cancel ----------
+    # ---------- Confirm / Cancel ----------
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CONFIRM")
 def confirm_profile(m):
     uid = m.from_user.id
@@ -328,6 +328,7 @@ def my_profile(m):
     else:
         bot.reply_to(m, text, parse_mode='Markdown')
     
+    # Edit and Main Menu buttons
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("✏️ EDIT PROFILE"), types.KeyboardButton("🏠 MAIN MENU"))
     bot.send_message(m.chat.id, "What would you like to do?", reply_markup=markup)
@@ -536,7 +537,7 @@ def edit_media_skip(m):
     bot.reply_to(m, "✅ Media kept.")
     show_main_menu(m.chat.id)
 
-# ---------- VIEW PROFILES ----------
+# ---------- VIEW PROFILES (all active profiles, loop) ----------
 @bot.message_handler(func=lambda m: m.text == "👀 VIEW PROFILES")
 def view_profiles(m):
     uid = m.from_user.id
@@ -657,7 +658,7 @@ def chat_handler(m):
 def receive_chat_message(m):
     uid = m.from_user.id
     # Do not forward control button texts
-    if m.text and m.text in ["❤️ LIKE", "💬 CHAT", "⏭️ SKIP", "🛑 STOP VIEWING"]:
+    if m.text and m.text in ["❤️ LIKE", "💬 CHAT", "⏭️ SKIP", "SKIP", "🛑 STOP VIEWING", "STOP VIEWING", "STOP"]:
         return
     target_info = user_temp_data.get(uid, {})
     target_id = target_info.get("chat_target")
@@ -678,8 +679,8 @@ def receive_chat_message(m):
     except Exception as e:
         bot.reply_to(m, f"❌ Could not deliver message: {e}")
 
-# ---------- SKIP (no message forwarding) ----------
-@bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
+# ---------- SKIP (working - no message) ----------
+@bot.message_handler(func=lambda m: m.text in ["⏭️ SKIP", "SKIP"])
 def skip_profile(m):
     uid = m.from_user.id
     if user_states.get(uid) == "awaiting_chat_message":
@@ -690,8 +691,8 @@ def skip_profile(m):
         session["index"] += 1
         send_profile(m.chat.id, uid)
 
-# ---------- STOP VIEWING (no message forwarding) ----------
-@bot.message_handler(func=lambda m: m.text == "🛑 STOP VIEWING")
+# ---------- STOP VIEWING (working - no message) ----------
+@bot.message_handler(func=lambda m: m.text in ["🛑 STOP VIEWING", "STOP VIEWING", "STOP"])
 def stop_viewing(m):
     uid = m.from_user.id
     if user_states.get(uid) == "awaiting_chat_message":
