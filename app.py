@@ -240,7 +240,8 @@ def done_media(m):
         except:
             pass
     user_states[uid] = "awaiting_confirm"
-    # ---------- Confirm / Cancel ----------
+
+# ---------- Confirm / Cancel ----------
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_confirm" and m.text == "CONFIRM")
 def confirm_profile(m):
     uid = m.from_user.id
@@ -680,7 +681,6 @@ def receive_chat_message(m):
 
 # ---------- Helper: Start view profiles for a user ----------
 def start_view_profiles_for_user(chat_id, user_id):
-    """Start a new swipe session for the user (clears any existing)"""
     if user_id in swipe_sessions:
         del swipe_sessions[user_id]
     my_profile = db.profiles.find_one({"user_id": user_id, "is_active": True})
@@ -704,21 +704,17 @@ def start_view_profiles_for_user(chat_id, user_id):
     swipe_sessions[user_id] = {"profiles": profiles, "index": 0}
     send_profile(chat_id, user_id)
 
-# ---------- SKIP (FIXED - both swiping and chat mode) ----------
+# ---------- SKIP BUTTON ----------
 @bot.message_handler(func=lambda m: m.text in ["⏭️ SKIP", "SKIP"])
 def skip_profile(m):
     uid = m.from_user.id
 
-    # CASE 1: Chat mode mein hai user
+    # Chat mode
     if user_states.get(uid) == "awaiting_chat_message":
         target_info = user_temp_data.get(uid, {})
         target_id = target_info.get("chat_target")
-
-        # Apni chat state clear karo
         user_states.pop(uid, None)
         user_temp_data.pop(uid, None)
-
-        # Dusre user ki chat state bhi clear karo
         if target_id:
             user_states.pop(target_id, None)
             user_temp_data.pop(target_id, None)
@@ -726,27 +722,21 @@ def skip_profile(m):
                 bot.send_message(target_id, f"⚠️ {m.from_user.first_name} skipped the chat.")
             except:
                 pass
-
-        # Naye profiles dikhao
         start_view_profiles_for_user(m.chat.id, uid)
         return
 
-    # CASE 2: Normal swiping mode
+    # Swiping mode
     session = swipe_sessions.get(uid)
     if not session:
         bot.reply_to(m, "❌ No active session. Tap 👀 VIEW PROFILES first.")
         return
-
     session["index"] += 1
-
-    # Agar index profiles list ke size se bada ho jaye, to shuffle karo aur index reset karo
     if session["index"] >= len(session["profiles"]):
         random.shuffle(session["profiles"])
         session["index"] = 0
-
     send_profile(m.chat.id, uid)
 
-# ---------- STOP VIEWING ----------
+# ---------- STOP VIEWING BUTTON ----------
 @bot.message_handler(func=lambda m: m.text in ["🛑 STOP VIEWING", "STOP VIEWING", "STOP"])
 def stop_viewing(m):
     uid = m.from_user.id
@@ -827,12 +817,12 @@ def notifications(m):
     bot.reply_to(m, "🔔 No new notifications.", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(m.chat.id)
 
-# ---------- FALLBACK (HAMESHA LAST MEIN RAKHNA) ----------
+# ---------- FALLBACK (HAMESHA LAST MEIN) ----------
 @bot.message_handler(func=lambda m: True)
 def fallback(m):
-    bot.reply_to(m, "❌ Invalid command. Use /start or buttons.", reply_markup=types.ReplyKeyboardRemove())
+    bot.reply_to(m, "❌ Invalid. Use /start or buttons.", reply_markup=types.ReplyKeyboardRemove())
 
-# ---------- Main ----------
+# ---------- MAIN ----------
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
