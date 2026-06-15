@@ -328,7 +328,6 @@ def my_profile(m):
     else:
         bot.reply_to(m, text, parse_mode='Markdown')
     
-    # Edit and Main Menu buttons
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(types.KeyboardButton("✏️ EDIT PROFILE"), types.KeyboardButton("🏠 MAIN MENU"))
     bot.send_message(m.chat.id, "What would you like to do?", reply_markup=markup)
@@ -537,7 +536,7 @@ def edit_media_skip(m):
     bot.reply_to(m, "✅ Media kept.")
     show_main_menu(m.chat.id)
 
-# ---------- VIEW PROFILES (all active profiles, loop, no like filter) ----------
+# ---------- VIEW PROFILES ----------
 @bot.message_handler(func=lambda m: m.text == "👀 VIEW PROFILES")
 def view_profiles(m):
     uid = m.from_user.id
@@ -557,7 +556,6 @@ def view_profiles(m):
         query["gender"] = "female"
     
     profiles = list(db.profiles.find(query).limit(200))
-    
     if not profiles:
         bot.reply_to(m, "😔 No other active profiles found. Ask friends to join!")
         show_main_menu(m.chat.id)
@@ -573,18 +571,17 @@ def send_profile(chat_id, uid):
         return
     idx = session["index"]
     profiles = session["profiles"]
-    
     if idx >= len(profiles):
         idx = 0
         session["index"] = 0
-    
     p = profiles[idx]
     text = f"👤 {p.get('name')}\n🎂 Age: {p.get('age')}\n📍 {p.get('location_text', 'No location')}\n📝 {p.get('about', '')[:100]}"
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
+        types.KeyboardButton("❤️ LIKE"),
         types.KeyboardButton("💬 CHAT"),
-        types.KeyboardButton("SKIP"),
-        types.KeyboardButton("STOP VIEWING")
+        types.KeyboardButton("⏭️ SKIP"),
+        types.KeyboardButton("🛑 STOP VIEWING")
     )
     media = p.get('media', [])
     if media:
@@ -596,7 +593,36 @@ def send_profile(chat_id, uid):
         bot.send_message(chat_id, text, reply_markup=markup)
     session["current_profile_id"] = p["user_id"]
 
-# ---------- CHAT (direct, no like required) ----------
+# ---------- LIKE ----------
+@bot.message_handler(func=lambda m: m.text == "❤️ LIKE")
+def like_profile(m):
+    uid = m.from_user.id
+    session = swipe_sessions.get(uid)
+    if not session:
+        bot.reply_to(m, "No active swipe session.")
+        return
+    target_id = session.get("current_profile_id")
+    if not target_id:
+        return
+    
+    db.likes.update_one(
+        {"from_user": uid, "to_user": target_id},
+        {"$set": {"created_at": datetime.utcnow()}},
+        upsert=True
+    )
+    mutual = db.likes.find_one({"from_user": target_id, "to_user": uid})
+    if mutual:
+        db.likes.update_many(
+            {"$or": [{"from_user": uid, "to_user": target_id}, {"from_user": target_id, "to_user": uid}]},
+            {"$set": {"is_mutual": True}}
+        )
+        bot.reply_to(m, "🎉 It's a match! You can now chat.")
+    else:
+        bot.reply_to(m, "❤️ Liked!")
+    session["index"] += 1
+    send_profile(m.chat.id, uid)
+
+# ---------- CHAT (only after mutual match) ----------
 @bot.message_handler(func=lambda m: m.text == "💬 CHAT")
 def chat_handler(m):
     uid = m.from_user.id
@@ -609,6 +635,13 @@ def chat_handler(m):
         bot.reply_to(m, "❌ Profile not found.")
         return
     
+    # Mutual match check
+    user_likes_target = db.likes.find_one({"from_user": uid, "to_user": target_id})
+    target_likes_user = db.likes.find_one({"from_user": target_id, "to_user": uid})
+    if not (user_likes_target and target_likes_user):
+        bot.reply_to(m, "💬 Chat only allowed after mutual match. Like each other first!")
+        return
+    
     target_profile = db.profiles.find_one({"user_id": target_id, "is_active": True})
     if not target_profile:
         bot.reply_to(m, "❌ Target profile not active.")
@@ -619,11 +652,12 @@ def chat_handler(m):
     bot.reply_to(m, f"💬 You can now message {target_name}. Send your message (text/photo/video):")
     user_states[uid] = "awaiting_chat_message"
 
+# ---------- Message forwarder (ignores control buttons) ----------
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_chat_message", content_types=['text', 'photo', 'video'])
 def receive_chat_message(m):
     uid = m.from_user.id
-    # 🔥 IGNORE these button texts – do not forward
-    if m.text and m.text in ["SKIP", "STOP VIEWING", "💬 CHAT"]:
+    # Do not forward control button texts
+    if m.text and m.text in ["❤️ LIKE", "💬 CHAT", "⏭️ SKIP", "🛑 STOP VIEWING"]:
         return
     target_info = user_temp_data.get(uid, {})
     target_id = target_info.get("chat_target")
@@ -644,11 +678,10 @@ def receive_chat_message(m):
     except Exception as e:
         bot.reply_to(m, f"❌ Could not deliver message: {e}")
 
-# ---------- SKIP (fixed: no message forwarding) ----------
-@bot.message_handler(func=lambda m: m.text == "SKIP")
+# ---------- SKIP (no message forwarding) ----------
+@bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
 def skip_profile(m):
     uid = m.from_user.id
-    # Agar chat mode ho to turant khatam karo
     if user_states.get(uid) == "awaiting_chat_message":
         user_states.pop(uid, None)
         user_temp_data.pop(uid, None)
@@ -657,8 +690,8 @@ def skip_profile(m):
         session["index"] += 1
         send_profile(m.chat.id, uid)
 
-# ---------- STOP VIEWING (fixed: no message forwarding) ----------
-@bot.message_handler(func=lambda m: m.text == "STOP VIEWING")
+# ---------- STOP VIEWING (no message forwarding) ----------
+@bot.message_handler(func=lambda m: m.text == "🛑 STOP VIEWING")
 def stop_viewing(m):
     uid = m.from_user.id
     if user_states.get(uid) == "awaiting_chat_message":
