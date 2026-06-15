@@ -690,4 +690,154 @@ def start_view_profiles_for_user(chat_id, user_id):
     user = db.users.find_one({"user_id": user_id})
     pref = user.get("preference", "both") if user else "both"
     query = {"user_id": {"$ne": user_id}, "is_active": True}
-    if pref ==
+    if pref == "male":
+        query["gender"] = "male"
+    elif pref == "female":
+        query["gender"] = "female"
+    profiles = list(db.profiles.find(query).limit(200))
+    if not profiles:
+        bot.send_message(chat_id, "😔 No other active profiles found. Ask friends to join!")
+        show_main_menu(chat_id)
+        return
+    random.shuffle(profiles)
+    swipe_sessions[user_id] = {"profiles": profiles, "index": 0}
+    send_profile(chat_id, user_id)
+
+# ---------- SKIP (working for both swiping and chat) ----------
+@bot.message_handler(func=lambda m: m.text in ["⏭️ SKIP", "SKIP"])
+def skip_profile(m):
+    uid = m.from_user.id
+    
+    # CASE 1: User active chat mode me hai
+    if user_states.get(uid) == "awaiting_chat_message":
+        session = swipe_sessions.get(uid)
+        target_id = None
+        
+        if session:
+            target_id = session.get("current_profile_id")
+        else:
+            target_info = user_temp_data.get(uid, {})
+            target_id = target_info.get("chat_target")
+        
+        if target_id:
+            bot.send_message(target_id, f"⚠️ {m.from_user.first_name} skipped you. You will now see new profiles.")
+            
+            if target_id in user_states:
+                user_states.pop(target_id, None)
+                user_temp_data.pop(target_id, None)
+            if target_id in swipe_sessions:
+                del swipe_sessions[target_id]
+            
+            start_view_profiles_for_user(target_id, target_id)
+        
+        user_states.pop(uid, None)
+        user_temp_data.pop(uid, None)
+        
+        if session:
+            session["index"] += 1
+            send_profile(m.chat.id, uid)
+        else:
+            start_view_profiles_for_user(m.chat.id, uid)
+        return
+    
+    # CASE 2: Normal swiping mode
+    session = swipe_sessions.get(uid)
+    if session:
+        session["index"] += 1
+        send_profile(m.chat.id, uid)
+
+# ---------- STOP VIEWING ----------
+@bot.message_handler(func=lambda m: m.text in ["🛑 STOP VIEWING", "STOP VIEWING", "STOP"])
+def stop_viewing(m):
+    uid = m.from_user.id
+    if user_states.get(uid) == "awaiting_chat_message":
+        target_info = user_temp_data.get(uid, {})
+        target_id = target_info.get("chat_target")
+        if target_id:
+            user_states.pop(target_id, None)
+            user_temp_data.pop(target_id, None)
+        user_states.pop(uid, None)
+        user_temp_data.pop(uid, None)
+    swipe_sessions.pop(uid, None)
+    show_main_menu(m.chat.id)
+
+# ---------- CHANGE INTEREST ----------
+@bot.message_handler(func=lambda m: m.text == "🎯 CHANGE INTEREST")
+def change_interest(m):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(types.KeyboardButton("👨 Male"), types.KeyboardButton("👩 Female"), types.KeyboardButton("👥 Both"))
+    bot.reply_to(m, "Select your new preference:", reply_markup=markup)
+    user_states[m.from_user.id] = "changing_interest"
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "changing_interest")
+def update_interest(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    if text in ["👨 Male", "👩 Female", "👥 Both"]:
+        pref = "male" if text == "👨 Male" else "female" if text == "👩 Female" else "both"
+        db.users.update_one({"user_id": uid}, {"$set": {"preference": pref}})
+        bot.reply_to(m, f"Preference changed to {text}.", reply_markup=types.ReplyKeyboardRemove())
+        user_states.pop(uid, None)
+        show_main_menu(m.chat.id)
+    else:
+        bot.reply_to(m, "Use buttons.")
+
+# ---------- STATS ----------
+@bot.message_handler(func=lambda m: m.text == "📊 STATS")
+def stats(m):
+    uid = m.from_user.id
+    given = db.likes.count_documents({"from_user": uid})
+    received = db.likes.count_documents({"to_user": uid})
+    bot.reply_to(m, f"📊 **Stats**\nLikes given: {given}\nLikes received: {received}")
+    show_main_menu(m.chat.id)
+
+# ---------- SETTINGS & DELETE ----------
+@bot.message_handler(func=lambda m: m.text == "⚙️ SETTINGS")
+def settings(m):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add(types.KeyboardButton("🗑 DELETE ACCOUNT"), types.KeyboardButton("🔙 BACK"))
+    bot.reply_to(m, "⚙️ Settings", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "🗑 DELETE ACCOUNT")
+def ask_delete(m):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(types.KeyboardButton("✅ CONFIRM DELETE"), types.KeyboardButton("❌ CANCEL"))
+    bot.reply_to(m, "⚠️ Are you sure? This is permanent.", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "✅ CONFIRM DELETE")
+def confirm_delete(m):
+    uid = m.from_user.id
+    db.profiles.update_one({"user_id": uid}, {"$set": {"is_active": False}})
+    db.users.update_one({"user_id": uid}, {"$set": {"is_active": False}})
+    bot.reply_to(m, "Account deleted. Use /start to create new.", reply_markup=types.ReplyKeyboardRemove())
+    user_states.pop(uid, None)
+    swipe_sessions.pop(uid, None)
+
+@bot.message_handler(func=lambda m: m.text == "❌ CANCEL")
+def cancel_action(m):
+    show_main_menu(m.chat.id)
+
+@bot.message_handler(func=lambda m: m.text == "🔙 BACK")
+def back_main(m):
+    show_main_menu(m.chat.id)
+
+# ---------- NOTIFICATIONS ----------
+@bot.message_handler(func=lambda m: m.text == "🔔 NOTIFICATIONS")
+def notifications(m):
+    bot.reply_to(m, "🔔 No new notifications.", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(m.chat.id)
+
+# ---------- Fallback ----------
+@bot.message_handler(func=lambda m: True)
+def fallback(m):
+    bot.reply_to(m, "Use /start or buttons.", reply_markup=types.ReplyKeyboardRemove())
+
+# ---------- Main ----------
+def main():
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(2)
+    logger.info("Bot polling started...")
+    bot.infinity_polling()
+
+if __name__ == "__main__":
+    main()
