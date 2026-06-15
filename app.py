@@ -556,7 +556,6 @@ def view_profiles(m):
     elif pref == "female":
         query["gender"] = "female"
     
-    # No like filter – show all active profiles
     profiles = list(db.profiles.find(query).limit(200))
     
     if not profiles:
@@ -584,8 +583,8 @@ def send_profile(chat_id, uid):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     markup.add(
         types.KeyboardButton("💬 CHAT"),
-        types.KeyboardButton("⏭️ SKIP"),
-        types.KeyboardButton("🛑 STOP VIEWING")
+        types.KeyboardButton("SKIP"),
+        types.KeyboardButton("STOP VIEWING")
     )
     media = p.get('media', [])
     if media:
@@ -623,6 +622,9 @@ def chat_handler(m):
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "awaiting_chat_message", content_types=['text', 'photo', 'video'])
 def receive_chat_message(m):
     uid = m.from_user.id
+    # 🔥 IGNORE these button texts – do not forward
+    if m.text and m.text in ["SKIP", "STOP VIEWING", "💬 CHAT"]:
+        return
     target_info = user_temp_data.get(uid, {})
     target_id = target_info.get("chat_target")
     target_name = target_info.get("chat_target_name")
@@ -631,7 +633,6 @@ def receive_chat_message(m):
         user_states.pop(uid, None)
         return
     
-    # Forward message to target
     try:
         if m.text:
             bot.send_message(target_id, f"💬 Message from {m.from_user.first_name}:\n{m.text}")
@@ -644,23 +645,25 @@ def receive_chat_message(m):
         bot.reply_to(m, f"❌ Could not deliver message: {e}")
 
 # ---------- SKIP (fixed: no message forwarding) ----------
-@bot.message_handler(func=lambda m: m.text == "⏭️ SKIP")
+@bot.message_handler(func=lambda m: m.text == "SKIP")
 def skip_profile(m):
     uid = m.from_user.id
-    # Agar user chat mode me ho, to forcibly exit
+    # Agar chat mode ho to turant khatam karo
     if user_states.get(uid) == "awaiting_chat_message":
         user_states.pop(uid, None)
         user_temp_data.pop(uid, None)
     session = swipe_sessions.get(uid)
-    if not session:
-        return
-    session["index"] += 1
-    send_profile(m.chat.id, uid)
+    if session:
+        session["index"] += 1
+        send_profile(m.chat.id, uid)
 
-# ---------- STOP ----------
-@bot.message_handler(func=lambda m: m.text == "🛑 STOP VIEWING")
+# ---------- STOP VIEWING (fixed: no message forwarding) ----------
+@bot.message_handler(func=lambda m: m.text == "STOP VIEWING")
 def stop_viewing(m):
     uid = m.from_user.id
+    if user_states.get(uid) == "awaiting_chat_message":
+        user_states.pop(uid, None)
+        user_temp_data.pop(uid, None)
     swipe_sessions.pop(uid, None)
     show_main_menu(m.chat.id)
 
